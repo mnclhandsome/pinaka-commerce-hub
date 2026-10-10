@@ -287,13 +287,12 @@ export class AppController {
       lastTestedAt: new Date(),
       lastTestMessage: test.message,
     });
-    const catalog = await this.syncStoreCatalog(store.merchantId, store.id, wordpressUrl, wordpressJwt);
     await this.merchantRepository.recordAuditLog(
       'STORE_WEBSITE_CONNECTOR_UPDATED',
       store.merchantId,
       store.id,
       'merchant',
-      { provider: 'WORDPRESS', wordpressUrl, status: connection.status, catalog },
+      { provider: 'WORDPRESS', wordpressUrl, status: connection.status },
     );
     return {
       success: true,
@@ -301,7 +300,6 @@ export class AppController {
       storeId: store.id,
       merchantId: store.merchantId,
       connector: this.toPublicConnector(connection),
-      catalog,
     };
   }
 
@@ -371,6 +369,66 @@ export class AppController {
     };
   }
 
+  @Post('stores/:storeId/catalog/sync/products')
+  async syncStoreProductsFromWebsite(
+    @Param('storeId') storeId: string,
+    @Req() request: { user?: { role?: string } },
+  ) {
+    const connection = await this.requireWordPressConnection(storeId, request.user?.role);
+    const count = await this.merchantRepository.syncStoreProductsFromWordPress(connection);
+    return {
+      success: true,
+      message: `Synced ${count} products.`,
+      storeId: connection.storeId,
+      productCount: count,
+    };
+  }
+
+  @Post('stores/:storeId/catalog/sync/categories')
+  async syncStoreCategoriesFromWebsite(
+    @Param('storeId') storeId: string,
+    @Req() request: { user?: { role?: string } },
+  ) {
+    const connection = await this.requireWordPressConnection(storeId, request.user?.role);
+    const count = await this.merchantRepository.syncStoreCategoriesFromWordPress(connection);
+    return {
+      success: true,
+      message: `Synced ${count} categories.`,
+      storeId: connection.storeId,
+      categoryCount: count,
+    };
+  }
+
+  @Post('stores/:storeId/catalog/sync/attributes')
+  async syncStoreAttributesFromWebsite(
+    @Param('storeId') storeId: string,
+    @Req() request: { user?: { role?: string } },
+  ) {
+    const connection = await this.requireWordPressConnection(storeId, request.user?.role);
+    const count = await this.merchantRepository.syncStoreAttributesFromWordPress(connection);
+    return {
+      success: true,
+      message: `Synced ${count} attributes.`,
+      storeId: connection.storeId,
+      attributeCount: count,
+    };
+  }
+
+  @Post('stores/:storeId/catalog/sync/tags')
+  async syncStoreTagsFromWebsite(
+    @Param('storeId') storeId: string,
+    @Req() request: { user?: { role?: string } },
+  ) {
+    const connection = await this.requireWordPressConnection(storeId, request.user?.role);
+    const count = await this.merchantRepository.syncStoreTagsFromWordPress(connection);
+    return {
+      success: true,
+      message: `Synced ${count} tags.`,
+      storeId: connection.storeId,
+      tagCount: count,
+    };
+  }
+
   @Get('stores/:storeId/catalog')
   async getStoreCatalog(@Param('storeId') storeId: string) {
     const store = await this.merchantRepository.getStoreById(storeId);
@@ -403,6 +461,16 @@ export class AppController {
     const store = await this.merchantRepository.getStoreById(storeId);
     if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
     return this.merchantRepository.searchStoreProducts(store.id, search ?? '');
+  }
+
+  @Get('store/:storeId/products/:productId/variations')
+  async getStoreProductVariations(
+    @Param('storeId') storeId: string,
+    @Param('productId') productId: string,
+  ) {
+    const store = await this.merchantRepository.getStoreById(storeId);
+    if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    return this.merchantRepository.getStoreProductVariations(store.id, productId);
   }
 
   @Get('store/:storeId/store-categories/:categoryId/products')
@@ -847,6 +915,26 @@ export class AppController {
         'The saved WordPress JWT was encrypted with a different server key. Edit the website connection and save the JWT token again.',
       );
     }
+  }
+
+  private async requireWordPressConnection(storeId: string, role?: string) {
+    this.requireOwnerRole(role);
+    const store = await this.merchantRepository.getStoreById(storeId);
+    if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    const connector = await this.merchantRepository.getWebsiteConnection(store.id)
+      || await this.merchantRepository.getWebsiteConnection(storeId);
+    if (!connector?.encryptedJwt || !connector.wordpressUrl) {
+      throw new BadRequestException('Connect the WordPress site before syncing the catalog');
+    }
+    if (connector.status !== 'CONNECTED') {
+      throw new BadRequestException('Validate the WordPress connection before syncing.');
+    }
+    return {
+      merchantId: store.merchantId,
+      storeId: store.id,
+      wordpressUrl: connector.wordpressUrl,
+      wordpressJwt: this.decryptConnectorSecret(connector.encryptedJwt),
+    };
   }
 
   private async syncStoreCatalog(

@@ -2953,40 +2953,129 @@ export class MerchantRepository implements OnModuleInit {
     storeId: string;
     wordpressUrl: string;
     wordpressJwt: string;
-  }): Promise<{ categoryCount: number; productCount: number }> {
-    const { categories, response } = await this.fetchWordPressCategoryCatalog(
+  }): Promise<{ categoryCount: number; productCount: number; attributeCount: number; tagCount: number }> {
+    const productCount = await this.syncStoreProductsFromWordPress(params);
+    const categoryCount = await this.syncStoreCategoriesFromWordPress(params);
+    const attributeCount = await this.syncStoreAttributesFromWordPress(params);
+    const tagCount = await this.syncStoreTagsFromWordPress(params);
+    return { categoryCount, productCount, attributeCount, tagCount };
+  }
+
+  async syncStoreProductsFromWordPress(params: {
+    storeId: string;
+    wordpressUrl: string;
+    wordpressJwt: string;
+  }): Promise<number> {
+    const products = await this.fetchWooCollection(
       params.wordpressUrl,
       params.wordpressJwt,
+      '/wp-json/wc/v3/products',
+      { per_page: '100' },
     );
-    let productCount = 0;
-    const payload: Array<Record<string, unknown>> = [];
-    for (const node of categories) {
-      if (!Number.isFinite(Number(node.id))) continue;
-      const savedCategory = await this.upsertStoreCategory(
-        params.merchantId,
-        params.storeId,
-        node,
+    const variations: unknown[] = [];
+    for (const product of products) {
+      const record = product as Record<string, unknown>;
+      const id = Number(record.id);
+      const variationIds = Array.isArray(record.variations) ? record.variations : [];
+      if (record.type !== 'variable' || !Number.isFinite(id) || variationIds.length === 0) continue;
+      const children = await this.fetchWooCollection(
+        params.wordpressUrl,
+        params.wordpressJwt,
+        `/wp-json/wc/v3/products/${id}/variations`,
+        { per_page: '100' },
       );
-      const products = Array.isArray(node.products) ? node.products : [];
-      for (const product of products) {
-        if (!Number.isFinite(Number(product.id))) continue;
-        await this.upsertStoreProduct(
-          params.merchantId,
-          params.storeId,
-          savedCategory,
-          product,
-        );
-        payload.push(this.storeProductPayload(node, product));
-        productCount += 1;
-      }
+      variations.push(...children);
     }
-    await this.saveStoreCategoriesProducts(params.storeId, payload, response);
-    const parentCategories = await this.fetchWordPressParentCategories(
+    const merged = new Map<string, unknown>();
+    for (const item of [...products, ...variations]) {
+      const record = item as Record<string, unknown>;
+      if (record?.id === undefined || record?.id === null) continue;
+      merged.set(String(record.id), item);
+    }
+    const payload = [...merged.values()];
+    await this.saveStoreProductPayload(params.storeId, payload);
+    return payload.length;
+  }
+
+  async syncStoreCategoriesFromWordPress(params: {
+    storeId: string;
+    wordpressUrl: string;
+    wordpressJwt: string;
+  }): Promise<number> {
+    const categories = await this.fetchWooCollection(
       params.wordpressUrl,
       params.wordpressJwt,
+      '/wp-json/wc/v3/products/categories',
+      { per_page: '100', hide_empty: 'true', parent: '0' },
     );
-    await this.saveStoreCategories(params.storeId, parentCategories);
-    return { categoryCount: categories.length, productCount };
+    await this.saveStoreCategoryColumn(params.storeId, 'payload', categories);
+    return categories.length;
+  }
+
+  async syncStoreAttributesFromWordPress(params: {
+    storeId: string;
+    wordpressUrl: string;
+    wordpressJwt: string;
+  }): Promise<number> {
+    const attributes = await this.fetchWooCollection(
+      params.wordpressUrl,
+      params.wordpressJwt,
+      '/wp-json/wc/v3/products/attributes',
+      { per_page: '100' },
+    );
+    await this.saveStoreCategoryColumn(params.storeId, 'attributes', attributes);
+    return attributes.length;
+  }
+
+  async syncStoreTagsFromWordPress(params: {
+    storeId: string;
+    wordpressUrl: string;
+    wordpressJwt: string;
+  }): Promise<number> {
+    const tags = await this.fetchWooCollection(
+      params.wordpressUrl,
+      params.wordpressJwt,
+      '/wp-json/wc/v3/products/tags',
+      { per_page: '100' },
+    );
+    await this.saveStoreCategoryColumn(params.storeId, 'tags', tags);
+    return tags.length;
+  }
+
+  private async fetchWooCollection(
+    wordpressUrl: string,
+    wordpressJwt: string,
+    path: string,
+    query: Record<string, string>,
+  ): Promise<unknown[]> {
+    const baseUrl = wordpressUrl.replace(/\/+$/, '');
+    const items: unknown[] = [];
+    let page = 1;
+    let totalPages = 1;
+    while (page <= totalPages && page <= 200) {
+      const url = new URL(`${baseUrl}${path}`);
+      for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
+      url.searchParams.set('page', String(page));
+      const response = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${wordpressJwt}`,
+        },
+      });
+      if (!response.ok) {
+        throw new BadRequestException(
+          `WordPress API ${path} returned HTTP ${response.status}. Check the site URL and JWT token.`,
+        );
+      }
+      const body = await response.json();
+      const pageItems = Array.isArray(body) ? body : [];
+      items.push(...pageItems);
+      const reportedPages = Number(response.headers.get('x-wp-totalpages'));
+      totalPages = Number.isFinite(reportedPages) && reportedPages > 0 ? reportedPages : page;
+      if (pageItems.length === 0) break;
+      page += 1;
+    }
+    return items;
   }
 
   private async fetchWordPressParentCategories(
@@ -3040,9 +3129,66 @@ export class MerchantRepository implements OnModuleInit {
       )
     `);
     await this.dataSource.query(`
+      ALTER TABLE public.store_categories
+      ADD COLUMN IF NOT EXISTS attributes jsonb
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE public.store_categories
+      ADD COLUMN IF NOT EXISTS tags jsonb
+    `);
+    await this.dataSource.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS store_categories_store_id_uidx
       ON public.store_categories (store_id)
     `);
+  }
+
+  private async saveStoreProductPayload(
+    storeId: string,
+    products: unknown[],
+  ): Promise<void> {
+    await this.dataSource.query(
+      `INSERT INTO public.store_products (store_id, payload, updated_at)
+       VALUES ($1::uuid, $2::jsonb, now())
+       ON CONFLICT (store_id)
+       DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), is_deleted = false`,
+      [storeId, JSON.stringify(products)],
+    );
+  }
+
+  private async saveStoreCategoryColumn(
+    storeId: string,
+    column: 'payload' | 'attributes' | 'tags',
+    value: unknown[],
+  ): Promise<void> {
+    await this.ensureStoreCategoriesTable();
+    const json = JSON.stringify(value);
+    if (column === 'payload') {
+      await this.dataSource.query(
+        `INSERT INTO public.store_categories (store_id, payload, updated_at)
+         VALUES ($1::uuid, $2::jsonb, now())
+         ON CONFLICT (store_id)
+         DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), is_deleted = false`,
+        [storeId, json],
+      );
+      return;
+    }
+    if (column === 'attributes') {
+      await this.dataSource.query(
+        `INSERT INTO public.store_categories (store_id, attributes, updated_at)
+         VALUES ($1::uuid, $2::jsonb, now())
+         ON CONFLICT (store_id)
+         DO UPDATE SET attributes = EXCLUDED.attributes, updated_at = now(), is_deleted = false`,
+        [storeId, json],
+      );
+      return;
+    }
+    await this.dataSource.query(
+      `INSERT INTO public.store_categories (store_id, tags, updated_at)
+       VALUES ($1::uuid, $2::jsonb, now())
+       ON CONFLICT (store_id)
+       DO UPDATE SET tags = EXCLUDED.tags, updated_at = now(), is_deleted = false`,
+      [storeId, json],
+    );
   }
 
   private async saveStoreCategories(
@@ -3115,6 +3261,106 @@ export class MerchantRepository implements OnModuleInit {
     }
     const products = rows[0]?.products;
     if (!Array.isArray(products) || products.length === 0) return null;
+    return products.map((product) =>
+      this.presentWooProduct(this.asRecord(product) ?? {}, null),
+    );
+  }
+
+  async getStoreProductVariations(
+    storeId: string,
+    productId: string,
+  ): Promise<unknown[] | null> {
+    const parentId = String(productId ?? '').trim();
+
+    if (!/^\d+$/.test(parentId)) {
+      throw new BadRequestException('productId must be a number');
+    }
+
+    let rows: Array<{ products?: unknown }> = [];
+
+    try {
+      rows = await this.dataSource.query(
+        `
+        WITH catalog_products AS MATERIALIZED (
+          SELECT product.item
+          FROM public.store_products AS catalog
+          CROSS JOIN LATERAL jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof(catalog.payload) = 'array'
+                THEN catalog.payload
+              ELSE '[]'::jsonb
+            END
+          ) AS product(item)
+          WHERE catalog.store_id = $1::uuid
+            AND COALESCE(catalog.is_deleted, false) = false
+        ),
+        parent_variations AS (
+          SELECT variation.id AS variation_id
+          FROM catalog_products AS parent
+          CROSS JOIN LATERAL jsonb_array_elements_text(
+            CASE
+              WHEN jsonb_typeof(parent.item->'variations') = 'array'
+                THEN parent.item->'variations'
+              ELSE '[]'::jsonb
+            END
+          ) AS variation(id)
+          WHERE parent.item->>'id' = $2
+        ),
+        matched_products AS (
+          SELECT product.item
+          FROM catalog_products AS product
+          WHERE product.item->>'parent_id' = $2
+
+          UNION
+
+          SELECT child.item
+          FROM catalog_products AS child
+          INNER JOIN parent_variations AS variation
+            ON child.item->>'id' = variation.variation_id
+          WHERE child.item->>'id' <> $2
+        )
+        SELECT COALESCE(
+          jsonb_agg(
+            matched.item
+            ORDER BY
+              matched.item->>'menu_order',
+              matched.item->>'id'
+          ),
+          '[]'::jsonb
+        ) AS products
+        FROM matched_products AS matched
+        `,
+        [storeId, parentId],
+      );
+    } catch (error: unknown) {
+      const code =
+        error && typeof error === 'object'
+          ? (
+              error as {
+                code?: string;
+                driverError?: { code?: string };
+              }
+            ).code ??
+            (
+              error as {
+                driverError?: { code?: string };
+              }
+            ).driverError?.code
+          : undefined;
+
+      if (code === '42P01' || code === '42703') {
+        return [];
+      }
+
+      throw error;
+    }
+
+    const products = rows[0]?.products;
+
+    if (!Array.isArray(products) || products.length === 0) {
+      return [];
+    }
+
     return products.map((product) =>
       this.presentWooProduct(this.asRecord(product) ?? {}, null),
     );
@@ -3476,7 +3722,7 @@ export class MerchantRepository implements OnModuleInit {
   ): Promise<{ categories: WordPressCategoryNode[]; response: unknown }> {
     const baseUrl = wordpressUrl.replace(/\/+$/, '');
     const response = await fetch(
-      `${baseUrl}/wp-json/pinaka-pos/v1/categories/get-categories-products`,
+      `${baseUrl}/wp-json/wc/v3/products?per_page=20000`,
       {
         headers: {
           Accept: 'application/json',

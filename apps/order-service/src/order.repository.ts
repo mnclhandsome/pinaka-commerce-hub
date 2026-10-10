@@ -6,6 +6,13 @@ import { postgresConnectionOptions } from '@pinaka-delivery-hub/database';
 import { OrderEntity, OrderType, PaymentMethod, PaymentStatus, OrderStatus } from './entities/order.entity';
 import { OrderItemEntity } from './entities/order-item.entity';
 import { OrderStatusHistoryEntity } from './entities/order-status-history.entity';
+import { StoreOrderEntity } from './entities/store-order.entity';
+import {
+  calculateStoreOrder,
+  type StoreOrderCalculationInput,
+  sumLineSubtotals,
+  sumLineTotals,
+} from './calculations/store-order.calculations';
 
 @Injectable()
 export class OrderRepository implements OnModuleInit {
@@ -13,6 +20,7 @@ export class OrderRepository implements OnModuleInit {
   private orderRepo?: Repository<OrderEntity>;
   private itemRepo?: Repository<OrderItemEntity>;
   private historyRepo?: Repository<OrderStatusHistoryEntity>;
+  private storeOrderRepo?: Repository<StoreOrderEntity>;
   private redisClient?: Redis;
   private isDbConnected = false;
   private isRedisConnected = false;
@@ -26,15 +34,17 @@ export class OrderRepository implements OnModuleInit {
       await this.migrateLegacyOrderIdsBeforeOrm();
       await this.migrateOrderColumnsToSnakeCase();
       this.dataSource = new DataSource({
-        ...postgresConnectionOptions([OrderEntity, OrderItemEntity, OrderStatusHistoryEntity]),
+        ...postgresConnectionOptions([OrderEntity, OrderItemEntity, OrderStatusHistoryEntity, StoreOrderEntity]),
         synchronize: false,
       });
       await this.dataSource.initialize();
       await this.ensureOrderUuidSchema();
       await this.ensurePosOrderColumns();
+      await this.ensureStoreOrdersTable();
       this.orderRepo = this.dataSource.getRepository(OrderEntity);
       this.itemRepo = this.dataSource.getRepository(OrderItemEntity);
       this.historyRepo = this.dataSource.getRepository(OrderStatusHistoryEntity);
+      this.storeOrderRepo = this.dataSource.getRepository(StoreOrderEntity);
       this.isDbConnected = true;
     } catch (err: any) {
       console.log(`⚠️ [Order Service DB] Offline (${err.message}). Using in-memory store fallback.`);
@@ -57,13 +67,25 @@ export class OrderRepository implements OnModuleInit {
     }
   }
 
-  async createOrder(orderData: any): Promise<{ order: OrderEntity; items: OrderItemEntity[]; duplicate: boolean }> {
+  async calculate(input: StoreOrderCalculationInput = {}, storeId?: string) {
+    const result = calculateStoreOrder(input);
+    if (!input.includeCashbackFee) return { ...result, cashbackFee: 0 };
+    const cashbackLine = (input.lineItems || []).find(
+      (line) => String(line?.name || '').trim().toLowerCase() === 'cashback',
+    );
+    const amount = input.cashbackAmount ?? Math.abs(Number(cashbackLine?.total || 0));
+    const cashbackFee = await this.cashbackFeeForAmount(storeId || '', amount);
+    return { ...result, cashbackFee };
+  }
+
+  async createOrder(orderData: any): Promise<{ order: OrderEntity; items: OrderItemEntity[]; storeOrder: StoreOrderEntity | null; duplicate: boolean }> {
     if (!this.isDbConnected || !this.dataSource || !this.orderRepo || !this.itemRepo) {
       throw new ServiceUnavailableException('Order database is unavailable; the order was not saved');
     }
+    const sourcePayload = JSON.parse(JSON.stringify(orderData.requestPayload || {}));
     if (this.isDbConnected && this.dataSource) {
       const stores = await this.dataSource.query(
-        `SELECT id, merchant_id
+        `SELECT id, merchant_id, currency, timezone
          FROM public.stores
          WHERE id = $1::uuid AND COALESCE(is_deleted, false) = false
          LIMIT 1`,
@@ -73,9 +95,8 @@ export class OrderRepository implements OnModuleInit {
         throw new BadRequestException(`Store '${orderData.storeId}' was not found`);
       }
       orderData.merchantId = orderData.merchantId || stores[0].merchant_id;
-    }
-    if (orderData.source === 'WORDPRESS_COMPATIBLE') {
-      orderData = await this.prepareWordPressCompatibleOrder(orderData);
+      orderData.currency = stores[0].currency || 'USD';
+      orderData.timezone = stores[0].timezone || 'UTC';
     }
     const clientOrderId = String(orderData.clientOrderId || '').trim() || undefined;
     if (clientOrderId) {
@@ -93,7 +114,8 @@ export class OrderRepository implements OnModuleInit {
         const existingItems = this.isDbConnected && this.itemRepo
           ? await this.itemRepo.find({ where: { orderId: existing.id } })
           : this.inMemoryItems.filter(item => item.orderId === existing.id);
-        return { order: existing, items: existingItems, duplicate: true };
+        const storeOrder = await this.findStoreOrder(existing.id);
+        return { order: existing, items: existingItems, storeOrder, duplicate: true };
       }
     }
     const id = randomUUID();
@@ -151,13 +173,16 @@ export class OrderRepository implements OnModuleInit {
       updatedAt: new Date(),
     };
 
+    const storeOrder = this.buildStoreOrder(id, orderData, sourcePayload);
     if (this.isDbConnected && this.orderRepo && this.itemRepo && this.dataSource) {
       let savedOrder: OrderEntity;
+      let savedStoreOrder: StoreOrderEntity;
       try {
-        savedOrder = await this.dataSource.transaction(async manager => {
+        const saved = await this.dataSource.transaction(async manager => {
           const orderRepository = manager.getRepository(OrderEntity);
           const itemRepository = manager.getRepository(OrderItemEntity);
           const historyRepository = manager.getRepository(OrderStatusHistoryEntity);
+          const storeOrderRepository = manager.getRepository(StoreOrderEntity);
           const persistedOrder = await orderRepository.save(orderRepository.create(order));
           await itemRepository.save(items.map(item => itemRepository.create(item)));
           await historyRepository.save(historyRepository.create({
@@ -169,8 +194,11 @@ export class OrderRepository implements OnModuleInit {
             reason: 'Initial Order Creation',
             createdAt: new Date(),
           }));
-          return persistedOrder;
+          const persistedStoreOrder = await storeOrderRepository.save(storeOrderRepository.create(storeOrder));
+          return { persistedOrder, persistedStoreOrder };
         });
+        savedOrder = saved.persistedOrder;
+        savedStoreOrder = saved.persistedStoreOrder;
       } catch (error: unknown) {
         if (error instanceof QueryFailedError && (error as any).driverError?.code === '22P02') {
           throw new BadRequestException(
@@ -181,95 +209,73 @@ export class OrderRepository implements OnModuleInit {
       }
       await this.cacheOrder(savedOrder);
       console.log(`🛍️ [Order Created] Order ${savedOrder.orderNumber} ($${savedOrder.totalAmount}) created for Store ${savedOrder.storeId}`);
-      return { order: savedOrder, items, duplicate: false };
+      return { order: savedOrder, items, storeOrder: savedStoreOrder, duplicate: false };
     } else {
       this.inMemoryOrders.unshift(order);
       this.inMemoryItems.push(...items);
       await this.recordStatusChange(id, 'NONE', order.orderStatus, 'POS System', 'Initial Order Creation');
       await this.cacheOrder(order);
       console.log(`🛍️ [Order Created (InMemory)] Order ${order.orderNumber} ($${order.totalAmount}) created for Store ${order.storeId}`);
-      return { order, items, duplicate: false };
+      return { order, items, storeOrder, duplicate: false };
     }
   }
 
-  private async prepareWordPressCompatibleOrder(orderData: any): Promise<any> {
-    const payload = JSON.parse(JSON.stringify(orderData.requestPayload || {}));
-    const metadata = Array.isArray(payload.meta_data) ? payload.meta_data : [];
-    const metaValue = (key: string) => metadata.find((entry: any) => entry?.key === key)?.value;
-    const clientOrderId = String(metaValue('_pos_client_order_id') || orderData.clientOrderId || '');
-    const merchantDiscount = Math.abs(Number(metaValue('_merchant_discount') || 0));
-    const requestedItems = Array.isArray(payload.line_items) ? payload.line_items : [];
-    const cashbackItem = requestedItems.find(
-      (item: any) => String(item?.name || '').trim().toLowerCase() === 'cashback',
-    );
-    const cashbackAmount = Math.abs(Number(cashbackItem?.total || 0));
-    const cashbackFee = await this.cashbackFeeForAmount(orderData.storeId, cashbackAmount);
-    const productItems = requestedItems
-      .filter((item: any) => String(item?.name || '').trim().toLowerCase() !== 'cashback')
-      .map((item: any) => {
-        if (String(item?.name || '').trim().toLowerCase() === 'payout') {
-          return { ...item, subtotal: '0.00', total: '0.00' };
-        }
-        return { ...item };
-      });
-    const discountableSubtotal = productItems.reduce((sum: number, item: any) => {
-      if (String(item?.name || '').trim().toLowerCase() === 'payout') return sum;
-      return sum + Math.max(0, Number(item.subtotal ?? item.total ?? 0));
-    }, 0);
-    const netReduction = Math.max(0, merchantDiscount - cashbackFee);
-    let allocatedReduction = 0;
-    const lastDiscountableIndex = productItems.reduce(
-      (last: number, item: any, index: number) =>
-        String(item?.name || '').trim().toLowerCase() === 'payout' ? last : index,
-      -1,
-    );
-    const preparedItems = productItems.map((item: any, index: number) => {
-      if (String(item?.name || '').trim().toLowerCase() === 'payout' || !discountableSubtotal) {
-        return item;
-      }
-      const subtotal = Math.max(0, Number(item.subtotal ?? item.total ?? 0));
-      const reduction = index === lastDiscountableIndex
-        ? Math.max(0, netReduction - allocatedReduction)
-        : Math.round((netReduction * subtotal / discountableSubtotal) * 100) / 100;
-      allocatedReduction += reduction;
-      return { ...item, total: Math.max(0, subtotal - reduction).toFixed(2) };
-    });
-    payload.line_items = preparedItems;
-    payload.fee_lines = [];
-    if (merchantDiscount > 0 && clientOrderId) {
-      payload.coupon_lines = [{
-        id: 1,
-        code: `merchant_discount_${clientOrderId}`,
-        discount: String(merchantDiscount),
-        discount_tax: '0',
-        meta_data: [],
-        discount_type: 'fixed_cart',
-        nominal_amount: merchantDiscount,
-        free_shipping: false,
-      }];
-    }
-    const items = preparedItems.map((item: any) => {
-      const quantity = Number(item.quantity || 1);
-      const totalPrice = Number(item.total ?? item.subtotal ?? 0);
-      return {
-        productId: String(item.product_id ?? item.productId ?? ''),
-        productName: item.name || item.productName || 'Sales Item',
-        quantity,
-        unitPrice: totalPrice / quantity,
-        totalPrice,
-        modifiers: Array.isArray(item.meta_data) ? item.meta_data : [],
-      };
-    });
-    const totalAmount = items.reduce((sum: number, item: any) => sum + Number(item.totalPrice), 0);
-    return {
-      ...orderData,
-      requestPayload: payload,
-      items,
-      subtotal: discountableSubtotal,
-      taxAmount: 0,
-      discountAmount: merchantDiscount,
-      totalAmount: Math.round(totalAmount * 100) / 100,
+  private buildStoreOrder(orderId: string, orderData: any, sourcePayload: any): StoreOrderEntity {
+    const metadata = Array.isArray(sourcePayload?.meta_data)
+      ? sourcePayload.meta_data
+      : (Array.isArray(orderData.metadata) ? orderData.metadata : []);
+    const metaText = (key: string) => {
+      const value = metadata.find((entry: any) => entry?.key === key)?.value;
+      if (value === undefined || value === null || value === '') return undefined;
+      return String(value);
     };
+    const lineItems = Array.isArray(sourcePayload?.line_items)
+      ? sourcePayload.line_items
+      : (orderData.items || []).map((item: any) => ({
+          product_id: item.productId,
+          name: item.productName,
+          quantity: item.quantity,
+          subtotal: item.totalPrice,
+          total: item.totalPrice,
+          meta_data: item.modifiers || [],
+        }));
+    const payLaterUserId = metaText('_pay_later_user_id');
+    return {
+      id: randomUUID(),
+      orderId,
+      merchantId: orderData.merchantId,
+      storeId: orderData.storeId,
+      clientOrderId: metaText('_pos_client_order_id') || orderData.clientOrderId || undefined,
+      deviceId: metaText('pos_device_id'),
+      placedBy: metaText('pos_placed_by'),
+      shiftId: metaText('shift_id') || orderData.shiftId || undefined,
+      currency: String(orderData.currency || 'USD').toUpperCase(),
+      timezone: String(orderData.timezone || 'UTC'),
+      paymentMethod: sourcePayload?.payment_method || undefined,
+      paymentMethodTitle: sourcePayload?.payment_method_title || undefined,
+      setPaid: Boolean(sourcePayload?.set_paid),
+      status: String(sourcePayload?.status || orderData.orderStatus || 'processing').toLowerCase(),
+      payLater: Boolean(metadata.find((entry: any) => entry?.key === '_pay_later')?.value),
+      payLaterUserId,
+      subtotal: sumLineSubtotals(lineItems),
+      discountTotal: 0,
+      feeTotal: 0,
+      taxTotal: 0,
+      total: sumLineTotals(lineItems),
+      lineItems,
+      feeLines: Array.isArray(sourcePayload?.fee_lines) ? sourcePayload.fee_lines : [],
+      couponLines: Array.isArray(sourcePayload?.coupon_lines) ? sourcePayload.coupon_lines : [],
+      taxLines: Array.isArray(sourcePayload?.tax_lines) ? sourcePayload.tax_lines : [],
+      payments: [],
+      metaData: metadata,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+  }
+
+  private async findStoreOrder(orderId: string): Promise<StoreOrderEntity | null> {
+    if (!this.storeOrderRepo) return null;
+    return this.storeOrderRepo.findOne({ where: { orderId } });
   }
 
   private async cashbackFeeForAmount(storeId: string, amount: number): Promise<number> {
@@ -443,6 +449,52 @@ export class OrderRepository implements OnModuleInit {
     }
   }
 
+  private async ensureStoreOrdersTable(): Promise<void> {
+    if (!this.dataSource) return;
+    await this.dataSource.query(`
+      CREATE TABLE IF NOT EXISTS public.store_orders (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        order_id uuid NOT NULL,
+        merchant_id uuid NOT NULL,
+        store_id uuid NOT NULL,
+        client_order_id varchar(150),
+        device_id varchar(150),
+        placed_by varchar(100),
+        shift_id varchar(100),
+        currency varchar(10) NOT NULL DEFAULT 'USD',
+        timezone varchar(100) NOT NULL DEFAULT 'UTC',
+        payment_method varchar(50),
+        payment_method_title varchar(150),
+        set_paid boolean NOT NULL DEFAULT false,
+        status varchar(50) NOT NULL DEFAULT 'processing',
+        pay_later boolean NOT NULL DEFAULT false,
+        pay_later_user_id varchar(100),
+        subtotal numeric(12,2) NOT NULL DEFAULT 0,
+        discount_total numeric(12,2) NOT NULL DEFAULT 0,
+        fee_total numeric(12,2) NOT NULL DEFAULT 0,
+        tax_total numeric(12,2) NOT NULL DEFAULT 0,
+        total numeric(12,2) NOT NULL DEFAULT 0,
+        line_items jsonb NOT NULL DEFAULT '[]'::jsonb,
+        fee_lines jsonb NOT NULL DEFAULT '[]'::jsonb,
+        coupon_lines jsonb NOT NULL DEFAULT '[]'::jsonb,
+        tax_lines jsonb NOT NULL DEFAULT '[]'::jsonb,
+        payments jsonb NOT NULL DEFAULT '[]'::jsonb,
+        meta_data jsonb NOT NULL DEFAULT '[]'::jsonb,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    await this.dataSource.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS store_orders_store_client_order_uidx
+      ON public.store_orders (store_id, client_order_id)
+      WHERE client_order_id IS NOT NULL
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS store_orders_order_id_idx
+      ON public.store_orders (order_id)
+    `);
+  }
+
   private async ensurePosOrderColumns(): Promise<void> {
     if (!this.dataSource) return;
     await this.dataSource.query(`
@@ -555,19 +607,20 @@ export class OrderRepository implements OnModuleInit {
     return this.inMemoryOrders.filter(o => o.storeId === storeId);
   }
 
-  async getOrderById(orderId: string): Promise<{ order: OrderEntity; items: OrderItemEntity[]; history: OrderStatusHistoryEntity[] } | null> {
+  async getOrderById(orderId: string): Promise<{ order: OrderEntity; items: OrderItemEntity[]; history: OrderStatusHistoryEntity[]; storeOrder: StoreOrderEntity | null } | null> {
     if (this.isDbConnected && this.orderRepo && this.itemRepo && this.historyRepo) {
       const order = await this.orderRepo.findOne({ where: { id: orderId } });
       if (!order) return null;
       const items = await this.itemRepo.find({ where: { orderId } });
       const history = await this.historyRepo.find({ where: { orderId }, order: { createdAt: 'ASC' } });
-      return { order, items, history };
+      const storeOrder = await this.findStoreOrder(orderId);
+      return { order, items, history, storeOrder };
     } else {
       const order = this.inMemoryOrders.find(o => o.id === orderId);
       if (!order) return null;
       const items = this.inMemoryItems.filter(i => i.orderId === orderId);
       const history = this.inMemoryHistory.filter(h => h.orderId === orderId);
-      return { order, items, history };
+      return { order, items, history, storeOrder: null };
     }
   }
 

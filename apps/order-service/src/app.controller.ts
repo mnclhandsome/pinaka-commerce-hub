@@ -1,12 +1,15 @@
 import { Controller, Get, Post, Patch, Body, Param, Query, Headers, Inject, NotFoundException, BadRequestException } from '@nestjs/common';
 import { OrderRepository } from './order.repository';
 import { OrderStatus, OrderType, PaymentMethod, PaymentStatus } from './entities/order.entity';
+import type { StoreOrderCalculationInput } from './calculations/store-order.calculations';
+import { OrderResponsePresenter } from './responses/order-response.presenter';
 
 @Controller(['api/v1/orders', 'connector/api/v1/orders'])
 export class AppController {
   constructor(
     @Inject(OrderRepository)
     private readonly orderRepository: OrderRepository,
+    private readonly responses: OrderResponsePresenter,
   ) {}
 
   @Get('health')
@@ -19,6 +22,28 @@ export class AppController {
     };
   }
 
+  @Post('calculations')
+  calculate(
+    @Body() body: any,
+    @Headers('x-store-id') storeHeader?: string,
+  ) {
+    const input: StoreOrderCalculationInput = {
+      lineItems: body?.lineItems ?? body?.line_items ?? [],
+      feeLines: body?.feeLines ?? body?.fee_lines ?? [],
+      taxLines: body?.taxLines ?? body?.tax_lines ?? [],
+      payments: Array.isArray(body?.payments) ? body.payments : [],
+      discountAmount: body?.discountAmount,
+      tax: body?.tax,
+      includeFees: Boolean(body?.includeFees),
+      includePayments: Boolean(body?.includePayments),
+      includeCashbackFee: Boolean(body?.includeCashbackFee),
+      cashbackAmount: body?.cashbackAmount,
+      shippingTotal: body?.shippingTotal ?? body?.shipping_total,
+      decimalPlaces: body?.decimalPlaces,
+    };
+    return this.orderRepository.calculate(input, storeHeader || body?.storeId || body?.store_id);
+  }
+
   // --- 1. Create New Order (POS / Web / Online Delivery) ---
   @Post()
   async createOrder(
@@ -26,26 +51,13 @@ export class AppController {
     @Headers('x-store-id') storeHeader?: string,
     @Headers('x-merchant-id') merchantHeader?: string,
   ) {
-    const wordpressCompatible = Array.isArray(body?.line_items);
     const normalized = this.normalizeCreateOrder(body, storeHeader, merchantHeader);
     if (!normalized.storeId || !normalized.items.length) {
       throw new BadRequestException('storeId and at least 1 item are required to create an order');
     }
     const result = await this.orderRepository.createOrder(normalized);
-    if (wordpressCompatible) {
-      return this.toWordPressCompatibleResponse(result, result.order.requestPayload || body);
-    }
-    return {
-      success: true,
-      message: result.duplicate
-        ? `Order ${result.order.orderNumber} was already synced.`
-        : `Order ${result.order.orderNumber} created successfully!`,
-      duplicate: result.duplicate,
-      orderId: result.order.id,
-      orderNumber: result.order.orderNumber,
-      order: result.order,
-      items: result.items,
-    };
+    const request = result.order.requestPayload || body;
+    return this.responses.present(this.responses.profileFor(request), { result, request });
   }
 
   // --- 2. Get All Orders for Store ---
@@ -73,6 +85,7 @@ export class AppController {
       order: data.order,
       items: data.items,
       history: data.history,
+      storeOrder: data.storeOrder,
     };
   }
 
@@ -104,123 +117,6 @@ export class AppController {
       success: true,
       message: `Order #${id} cancelled successfully!`,
       order: cancelled,
-    };
-  }
-
-  private toWordPressCompatibleResponse(
-    result: { order: any; items: any[]; duplicate: boolean },
-    request: any,
-  ) {
-    const { order, items } = result;
-    const createdAt = new Date(order.createdAt);
-    const updatedAt = new Date(order.updatedAt);
-    const iso = (value: Date) => value.toISOString().replace(/\.\d{3}Z$/, '');
-    const money = (value: unknown) => Number(value || 0).toFixed(2);
-    const address = (value: any = {}) => ({
-      first_name: value.first_name || '',
-      last_name: value.last_name || '',
-      company: value.company || '',
-      address_1: value.address_1 || '',
-      address_2: value.address_2 || '',
-      city: value.city || '',
-      state: value.state || '',
-      postcode: value.postcode || '',
-      country: value.country || '',
-      email: value.email || '',
-      phone: value.phone || '',
-    });
-    const metadata = (Array.isArray(order.metadata) ? order.metadata : []).map(
-      (entry: any, index: number) => ({ id: index + 1, key: entry.key, value: entry.value }),
-    );
-    const lineItems = items.map((item: any, index: number) => {
-      const original = request.line_items?.[index] || {};
-      const itemMetadata = (Array.isArray(item.modifiers) ? item.modifiers : []).map(
-        (entry: any, metaIndex: number) => ({
-          id: metaIndex + 1,
-          key: entry.key,
-          value: entry.value,
-          display_key: entry.display_key ?? entry.key,
-          display_value: entry.display_value ?? entry.value,
-        }),
-      );
-      const numericProductId = Number(item.productId);
-      return {
-        id: item.id,
-        name: item.productName,
-        product_id: Number.isSafeInteger(numericProductId) ? numericProductId : item.productId,
-        variation_id: Number(original.variation_id || 0),
-        quantity: Number(item.quantity),
-        tax_class: original.tax_class || '',
-        subtotal: money(original.subtotal ?? item.totalPrice),
-        subtotal_tax: money(original.subtotal_tax),
-        total: money(item.totalPrice),
-        total_tax: money(original.total_tax),
-        taxes: Array.isArray(original.taxes) ? original.taxes : [],
-        meta_data: itemMetadata,
-        sku: original.sku ?? null,
-        global_unique_id: original.global_unique_id ?? null,
-        price: Number(item.unitPrice),
-        image: original.image || { id: 0, src: '' },
-        parent_name: original.parent_name ?? null,
-        product_data: original.product_data ?? null,
-      };
-    });
-    const completed = order.orderStatus === OrderStatus.COMPLETED;
-    const paid = order.paymentStatus === PaymentStatus.PAID;
-    const basePath = `/api/v1/orders/${order.id}`;
-
-    return {
-      id: order.id,
-      parent_id: request.parent_id || 0,
-      status: String(order.orderStatus).toLowerCase(),
-      currency: request.currency || 'INR',
-      version: 'PCH-2.0.0',
-      prices_include_tax: Boolean(request.prices_include_tax),
-      date_created: iso(createdAt),
-      date_modified: iso(updatedAt),
-      discount_total: money(order.discountAmount),
-      discount_tax: money(request.discount_tax),
-      shipping_total: money(request.shipping_total),
-      shipping_tax: money(request.shipping_tax),
-      cart_tax: money(request.cart_tax),
-      total: money(order.totalAmount),
-      total_tax: money(order.taxAmount),
-      customer_id: request.customer_id || 0,
-      order_key: `pch_order_${order.id}`,
-      billing: address(request.billing),
-      shipping: address(request.shipping),
-      payment_method: request.payment_method || String(order.paymentMethod).toLowerCase(),
-      payment_method_title: request.payment_method_title || order.paymentMethod,
-      transaction_id: request.transaction_id || '',
-      customer_ip_address: request.customer_ip_address || '',
-      customer_user_agent: request.customer_user_agent || '',
-      created_via: 'pch-rest-api',
-      customer_note: request.customer_note || '',
-      date_completed: completed ? iso(updatedAt) : null,
-      date_paid: paid ? iso(updatedAt) : null,
-      cart_hash: request.cart_hash || '',
-      number: String(order.orderNumber).replace(/^#/, ''),
-      meta_data: metadata,
-      line_items: lineItems,
-      tax_lines: Array.isArray(request.tax_lines) ? request.tax_lines : [],
-      shipping_lines: Array.isArray(request.shipping_lines) ? request.shipping_lines : [],
-      fee_lines: Array.isArray(request.fee_lines) ? request.fee_lines : [],
-      coupon_lines: Array.isArray(request.coupon_lines) ? request.coupon_lines : [],
-      refunds: [],
-      payment_url: '',
-      is_editable: !completed,
-      needs_payment: !paid,
-      needs_processing: !completed,
-      date_created_gmt: iso(createdAt),
-      date_modified_gmt: iso(updatedAt),
-      date_completed_gmt: completed ? iso(updatedAt) : null,
-      date_paid_gmt: paid ? iso(updatedAt) : null,
-      currency_symbol: request.currency_symbol || (request.currency === 'USD' ? '$' : '₹'),
-      duplicate: result.duplicate,
-      _links: {
-        self: [{ href: basePath, targetHints: { allow: ['GET', 'PATCH'] } }],
-        collection: [{ href: '/api/v1/orders' }],
-      },
     };
   }
 
@@ -260,7 +156,7 @@ export class AppController {
       items,
       subtotal: body?.subtotal !== undefined ? Number(body.subtotal) : lineSubtotal,
       taxAmount: Number(body?.taxAmount ?? metaValue('_pos_order_tax') ?? 0),
-      discountAmount: Number(body?.discountAmount ?? metaValue('_merchant_discount') ?? 0),
+      discountAmount: Number(body?.discountAmount ?? 0),
       tipAmount: Number(body?.tipAmount ?? 0),
       totalAmount: body?.total !== undefined ? Number(body.total) : undefined,
       customerName: body?.customerName || 'Walk-in Customer',
