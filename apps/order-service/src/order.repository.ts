@@ -795,6 +795,45 @@ export class OrderRepository implements OnModuleInit {
     return products;
   }
 
+  async getOrderDetails(id: string, storeId?: string) {
+    const key = String(id || '').trim();
+    if (!key) return null;
+    if (!this.isDbConnected || !this.orderRepo || !this.itemRepo) {
+      throw new ServiceUnavailableException('Order database is unavailable');
+    }
+    const scopedStore = storeId?.trim() || undefined;
+    if (this.isUuid(key)) {
+      const byId = await this.getOrderById(key);
+      if (byId && (!scopedStore || byId.order.storeId === scopedStore)) {
+        return { order: byId.order, items: byId.items, storeOrder: byId.storeOrder };
+      }
+    }
+    let matches: OrderEntity[] = [];
+    try {
+      matches = await this.orderRepo.find({
+        where: scopedStore
+          ? { clientOrderId: key, storeId: scopedStore }
+          : { clientOrderId: key },
+        order: { createdAt: 'DESC' },
+        take: 1,
+      });
+    } catch (error: unknown) {
+      if (error instanceof QueryFailedError && (error as { driverError?: { code?: string } }).driverError?.code === '22P02') {
+        throw new BadRequestException('storeId must be a UUID');
+      }
+      throw error;
+    }
+    const match = matches[0];
+    if (!match) return null;
+    const graph = await this.getOrderById(match.id);
+    if (!graph) return null;
+    return { order: graph.order, items: graph.items, storeOrder: graph.storeOrder };
+  }
+
+  private isUuid(value: string): boolean {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+  }
+
   async getOrdersByStore(storeId: string): Promise<OrderEntity[]> {
     if (this.isDbConnected && this.orderRepo) {
       return this.orderRepo.find({ where: { storeId }, order: { createdAt: 'DESC' } });
