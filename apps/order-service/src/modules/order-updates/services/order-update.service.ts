@@ -1,11 +1,13 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { moneyAmount } from '../../../calculations/order-update.calculations';
 import { OrderRepository } from '../../../order.repository';
-import type { AddOrderItemsDto, ApplyCouponDto, ApplyDiscountDto, CancelOrderDto } from '../dto/order-update.dto';
+import type { AddOrderItemsDto, ApplyCouponDto, ApplyDiscountDto, CancelOrderDto, UpdateOrderDto } from '../dto/order-update.dto';
 import { cancelFromDto, couponFromDto, discountFromDto, itemsFromDto } from '../order-update.normalize';
 import { OrderUpdatePresenter } from '../order-update.presenter';
+import { OrderStatus } from '../../../entities/order.entity';
 import type { OrderGraph, OrderMutationDraft } from '../order-update.types';
 import { OrderCancellationService } from './order-cancellation.service';
+import { OrderCouponCatalog } from './order-coupon.catalog';
 import { OrderCouponService } from './order-coupon.service';
 import { OrderDiscountService } from './order-discount.service';
 import { OrderItemService } from './order-item.service';
@@ -16,12 +18,50 @@ export class OrderUpdateService {
   constructor(
     @Inject(OrderRepository) private readonly orders: OrderRepository,
     @Inject(OrderCouponService) private readonly coupons: OrderCouponService,
+    @Inject(OrderCouponCatalog) private readonly couponCatalog: OrderCouponCatalog,
     @Inject(OrderDiscountService) private readonly discounts: OrderDiscountService,
     @Inject(OrderItemService) private readonly items: OrderItemService,
     @Inject(OrderCancellationService) private readonly cancellation: OrderCancellationService,
     @Inject(OrderLineMapper) private readonly lines: OrderLineMapper,
     @Inject(OrderUpdatePresenter) private readonly presenter: OrderUpdatePresenter,
   ) {}
+
+  async update(orderId: string, dto: UpdateOrderDto) {
+    const hasCoupons = dto.coupon_lines !== undefined;
+    const hasStatus = dto.status !== undefined && dto.status.trim() !== '';
+    if (!hasCoupons && !hasStatus) {
+      throw new BadRequestException('coupon_lines or status is required');
+    }
+    let graph = await this.load(orderId);
+    if (hasCoupons) {
+      const coupons = (dto.coupon_lines || []).map((line) => this.couponCatalog.resolve(line.code));
+      graph = await this.persist(graph, this.coupons.sync(graph, coupons));
+    }
+    if (hasStatus) {
+      graph = await this.persist(graph, this.statusChange(graph, String(dto.status)));
+    }
+    return this.presenter.present(graph);
+  }
+
+  private statusChange(graph: OrderGraph, requested: string): OrderMutationDraft {
+    const status = requested.trim().toLowerCase();
+    if (status === 'cancelled' || status === 'canceled') {
+      return this.cancellation.cancel(graph, cancelFromDto({}));
+    }
+    const allowed = new Set(['pending', 'processing', 'on-hold', 'completed', 'refunded', 'failed']);
+    if (!allowed.has(status)) {
+      throw new BadRequestException('status must be pending, processing, on-hold, completed, cancelled, refunded, or failed');
+    }
+    return {
+      orderStatus: status === 'completed' ? OrderStatus.COMPLETED : OrderStatus.CREATED,
+      storeStatus: status,
+      replaceItems: false,
+      history: {
+        changedBy: 'POS',
+        reason: `Status updated to ${status}`.slice(0, 255),
+      },
+    };
+  }
 
   async applyCoupon(orderId: string, dto: ApplyCouponDto) {
     const graph = await this.load(orderId);

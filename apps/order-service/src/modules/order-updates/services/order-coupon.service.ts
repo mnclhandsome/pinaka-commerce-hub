@@ -2,6 +2,8 @@ import { BadRequestException, ConflictException, Inject, Injectable } from '@nes
 import {
   applyCoupon,
   buildCouponLine,
+  withCouponBase,
+  type CouponSpec,
 } from '../../../calculations/order-update.calculations';
 import type { CouponCommand, OrderGraph, OrderMutationDraft } from '../order-update.types';
 import { OrderLineMapper } from './order-line.mapper';
@@ -57,6 +59,35 @@ export class OrderCouponService {
       ],
       replaceItems: true,
       appliedDiscount: applied.discount,
+    };
+  }
+
+  sync(graph: OrderGraph, coupons: CouponSpec[]): OrderMutationDraft {
+    this.policy.assertMutable(graph);
+    this.policy.requireStoreOrder(graph);
+    const seen = new Set<string>();
+    coupons.forEach((coupon) => {
+      const code = coupon.code.trim().toLowerCase();
+      if (seen.has(code)) throw new BadRequestException(`Coupon '${coupon.code}' is repeated`);
+      seen.add(code);
+    });
+
+    let lineItems = this.lines.fromGraph(graph).map((line) => withCouponBase(line));
+    const couponLines: unknown[] = [];
+    coupons.forEach((coupon) => {
+      const applied = applyCoupon(lineItems, coupon);
+      if (applied.discount <= 0) {
+        throw new BadRequestException(`Coupon '${coupon.code}' does not reduce this order`);
+      }
+      lineItems = applied.lineItems;
+      couponLines.push(buildCouponLine(coupon, applied.discount));
+    });
+
+    const priced = this.totals.priceLines(graph, lineItems);
+    return {
+      ...priced,
+      couponLines,
+      replaceItems: true,
     };
   }
 

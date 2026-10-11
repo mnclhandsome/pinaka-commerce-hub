@@ -4,6 +4,7 @@ import { OrderResponsePresenter } from '../../responses/order-response.presenter
 import { OrderUpdatePresenter } from './order-update.presenter';
 import { OrderUpdatesController } from './order-updates.controller';
 import { OrderCancellationService } from './services/order-cancellation.service';
+import { OrderCouponCatalog } from './services/order-coupon.catalog';
 import { OrderCouponService } from './services/order-coupon.service';
 import { OrderDiscountService } from './services/order-discount.service';
 import { OrderItemService } from './services/order-item.service';
@@ -19,6 +20,7 @@ import { OrderUpdateService } from './services/order-update.service';
     OrderUpdatePolicy,
     OrderLineMapper,
     OrderTotalsService,
+    OrderCouponCatalog,
     OrderCouponService,
     OrderDiscountService,
     OrderItemService,
