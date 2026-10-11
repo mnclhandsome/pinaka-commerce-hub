@@ -9,6 +9,7 @@ export class AppController {
   constructor(
     @Inject(OrderRepository)
     private readonly orderRepository: OrderRepository,
+    @Inject(OrderResponsePresenter)
     private readonly responses: OrderResponsePresenter,
   ) {}
 
@@ -103,20 +104,6 @@ export class AppController {
       success: true,
       message: `Order #${id} status updated to '${updated.orderStatus}'`,
       order: updated,
-    };
-  }
-
-  // --- 5. Cancel Order ---
-  @Post(':id/cancel')
-  async cancelOrder(@Param('id') id: string, @Body('reason') reason: string) {
-    const cancelled = await this.orderRepository.updateOrderStatus(id, OrderStatus.CANCELLED, 'Manager', reason || 'Customer Requested Cancellation');
-    if (!cancelled) {
-      throw new NotFoundException(`Order '${id}' not found`);
-    }
-    return {
-      success: true,
-      message: `Order #${id} cancelled successfully!`,
-      order: cancelled,
     };
   }
 
