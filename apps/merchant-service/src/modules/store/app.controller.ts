@@ -429,6 +429,16 @@ export class AppController {
     };
   }
 
+  @Get('stores/:storeId/catalog/products/sku/:sku')
+  async getStoreProductBySku(
+    @Param('storeId') storeId: string,
+    @Param('sku') sku: string,
+  ) {
+    const store = await this.merchantRepository.getStoreById(storeId);
+    if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    return this.merchantRepository.findStoreProductBySku(store.id, sku);
+  }
+
   @Get('stores/:storeId/catalog')
   async getStoreCatalog(@Param('storeId') storeId: string) {
     const store = await this.merchantRepository.getStoreById(storeId);

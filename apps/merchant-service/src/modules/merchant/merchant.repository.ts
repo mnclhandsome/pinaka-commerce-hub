@@ -3218,6 +3218,43 @@ export class MerchantRepository implements OnModuleInit {
     return rows[0]?.payload ?? null;
   }
 
+  async findStoreProductBySku(storeId: string, sku: string): Promise<unknown[]> {
+    let code = String(sku ?? '').trim();
+    try {
+      code = decodeURIComponent(code).trim();
+    } catch {
+      throw new BadRequestException('sku is not valid');
+    }
+    if (!code) throw new BadRequestException('sku is required');
+    let rows: Array<{ product?: unknown }> = [];
+    try {
+      rows = await this.dataSource.query(
+        `SELECT product
+         FROM public.store_products AS catalog
+         CROSS JOIN LATERAL jsonb_array_elements(
+           CASE
+             WHEN jsonb_typeof(catalog.payload) = 'array' THEN catalog.payload
+             ELSE '[]'::jsonb
+           END
+         ) AS product
+         WHERE catalog.store_id = $1::uuid
+           AND COALESCE(catalog.is_deleted, false) = false
+           AND product->>'sku' = $2`,
+        [storeId, code],
+      );
+    } catch (error: unknown) {
+      const postgresCode = error && typeof error === 'object'
+        ? (error as { code?: string; driverError?: { code?: string } }).code
+          ?? (error as { driverError?: { code?: string } }).driverError?.code
+        : undefined;
+      if (postgresCode === '42P01' || postgresCode === '42703') return [];
+      throw error;
+    }
+    return rows
+      .map((row) => row.product)
+      .filter((product) => product !== undefined && product !== null);
+  }
+
   async searchStoreProducts(
     storeId: string,
     search: string,
