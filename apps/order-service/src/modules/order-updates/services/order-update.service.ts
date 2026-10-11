@@ -28,26 +28,14 @@ export class OrderUpdateService {
     const command = couponFromDto(dto);
     const draft = this.coupons.apply(graph, command);
     const saved = await this.persist(graph, draft);
-    return this.presenter.present({
-      action: 'coupon_applied',
-      message: `Coupon ${command.code} applied`,
-      graph: saved,
-      totals: draft.totals,
-      appliedDiscount: draft.appliedDiscount,
-    });
+    return this.presenter.present(saved);
   }
 
   async applyDiscount(orderId: string, dto: ApplyDiscountDto) {
     const graph = await this.load(orderId);
     const draft = this.discounts.apply(graph, discountFromDto(dto));
     const saved = await this.persist(graph, draft);
-    return this.presenter.present({
-      action: 'discount_applied',
-      message: 'Discount applied',
-      graph: saved,
-      totals: draft.totals,
-      appliedDiscount: draft.appliedDiscount,
-    });
+    return this.presenter.present(saved);
   }
 
   async addItems(orderId: string, dto: AddOrderItemsDto) {
@@ -55,24 +43,14 @@ export class OrderUpdateService {
     const command = itemsFromDto(dto);
     const draft = this.items.add(graph, command);
     const saved = await this.persist(graph, draft);
-    const count = command.items.length;
-    return this.presenter.present({
-      action: 'items_added',
-      message: count === 1 ? '1 item added' : `${count} items added`,
-      graph: saved,
-      totals: draft.totals,
-    });
+    return this.presenter.present(saved);
   }
 
   async cancel(orderId: string, dto: CancelOrderDto = {}) {
     const graph = await this.load(orderId);
     const draft = this.cancellation.cancel(graph, cancelFromDto(dto));
     const saved = await this.persist(graph, draft);
-    return this.presenter.present({
-      action: 'cancelled',
-      message: `Order ${graph.order.orderNumber} cancelled`,
-      graph: saved,
-    });
+    return this.presenter.present(saved);
   }
 
   private async load(orderId: string): Promise<OrderGraph> {

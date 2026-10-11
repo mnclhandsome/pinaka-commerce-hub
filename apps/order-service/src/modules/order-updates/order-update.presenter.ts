@@ -1,59 +1,40 @@
-import { Injectable } from '@nestjs/common';
-import { moneyAmount } from '../../calculations/order-update.calculations';
-import type { StoreOrderTotals } from '../../calculations/store-order.calculations';
-import type { OrderGraph, OrderUpdateAction } from './order-update.types';
+import { Inject, Injectable } from '@nestjs/common';
+import { OrderResponsePresenter } from '../../responses/order-response.presenter';
+import type { OrderGraph } from './order-update.types';
 
 @Injectable()
 export class OrderUpdatePresenter {
-  present(input: {
-    action: OrderUpdateAction;
-    message: string;
-    graph: OrderGraph;
-    totals?: StoreOrderTotals;
-    appliedDiscount?: number;
-  }) {
-    const { graph } = input;
-    const tip = Number(graph.order.tipAmount || 0);
-    const tipAmount = Number.isFinite(tip) ? tip : 0;
-    const storedTotal = input.totals
-      ? moneyAmount(input.totals.total + tipAmount)
-      : moneyAmount(graph.storeOrder?.total ?? graph.order.totalAmount);
-    const body: Record<string, unknown> = {
-      success: true,
-      action: input.action,
-      message: input.message,
-      orderId: graph.order.id,
-      orderNumber: graph.order.orderNumber,
-      storeOrderId: graph.storeOrder?.id ?? null,
-      status: graph.storeOrder?.status || String(graph.order.orderStatus).toLowerCase(),
-      currency: graph.storeOrder?.currency || 'USD',
-      totals: input.totals
-        ? {
-            subtotal: moneyAmount(input.totals.subtotal),
-            discount_total: moneyAmount(input.totals.discountTotal),
-            fee_total: moneyAmount(input.totals.feeTotal),
-            tax_total: moneyAmount(input.totals.taxTotal),
-            shipping_total: moneyAmount(input.totals.shippingTotal),
-            total: storedTotal,
-          }
-        : {
-            subtotal: moneyAmount(graph.storeOrder?.subtotal ?? graph.order.subtotal),
-            discount_total: moneyAmount(graph.storeOrder?.discountTotal ?? graph.order.discountAmount),
-            fee_total: moneyAmount(graph.storeOrder?.feeTotal ?? 0),
-            tax_total: moneyAmount(graph.storeOrder?.taxTotal ?? graph.order.taxAmount),
-            shipping_total: 0,
-            total: storedTotal,
-          },
-      line_items: graph.storeOrder?.lineItems ?? [],
-      coupon_lines: graph.storeOrder?.couponLines ?? [],
-      fee_lines: graph.storeOrder?.feeLines ?? [],
-      tax_lines: graph.storeOrder?.taxLines ?? [],
-      items: graph.items,
-      order: graph.order,
+  constructor(
+    @Inject(OrderResponsePresenter)
+    private readonly responses: OrderResponsePresenter,
+  ) {}
+
+  present(graph: OrderGraph) {
+    const stored = { ...((graph.order.requestPayload || {}) as Record<string, unknown>) };
+    const storeOrder = graph.storeOrder;
+    delete stored.date_modified;
+    delete stored.date_modified_gmt;
+    const request = {
+      ...stored,
+      status: storeOrder?.status || String(graph.order.orderStatus || '').toLowerCase(),
+      currency: storeOrder?.currency || stored.currency,
+      discount_total: storeOrder?.discountTotal ?? graph.order.discountAmount,
+      total: storeOrder?.total ?? graph.order.totalAmount,
+      total_tax: storeOrder?.taxTotal ?? graph.order.taxAmount,
+      cart_tax: storeOrder?.taxTotal ?? stored.cart_tax,
+      line_items: storeOrder?.lineItems ?? stored.line_items,
+      coupon_lines: storeOrder?.couponLines ?? stored.coupon_lines,
+      fee_lines: storeOrder?.feeLines ?? stored.fee_lines,
+      tax_lines: storeOrder?.taxLines ?? stored.tax_lines,
     };
-    if (input.appliedDiscount !== undefined) {
-      body.applied_discount = moneyAmount(input.appliedDiscount);
-    }
-    return body;
+    return this.responses.present(this.responses.profileFor(request), {
+      result: {
+        order: graph.order,
+        items: graph.items,
+        storeOrder,
+        duplicate: false,
+      },
+      request,
+    });
   }
 }

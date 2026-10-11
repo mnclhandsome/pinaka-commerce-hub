@@ -2,6 +2,7 @@ import { Controller, Get, Post, Patch, Body, Param, Query, Headers, Inject, NotF
 import { OrderRepository } from './order.repository';
 import { OrderStatus, OrderType, PaymentMethod, PaymentStatus } from './entities/order.entity';
 import type { StoreOrderCalculationInput } from './calculations/store-order.calculations';
+import { OrderListPresenter } from './responses/order-list.presenter';
 import { OrderResponsePresenter } from './responses/order-response.presenter';
 
 @Controller(['api/v1/orders', 'connector/api/v1/orders'])
@@ -11,6 +12,8 @@ export class AppController {
     private readonly orderRepository: OrderRepository,
     @Inject(OrderResponsePresenter)
     private readonly responses: OrderResponsePresenter,
+    @Inject(OrderListPresenter)
+    private readonly orderLists: OrderListPresenter,
   ) {}
 
   @Get('health')
@@ -72,6 +75,27 @@ export class AppController {
       count: orders.length,
       orders,
     };
+  }
+
+  @Get('total-orders')
+  async listTotalOrders(
+    @Query('page') page?: string,
+    @Query('per_page') perPage?: string,
+    @Query('status') status?: string,
+    @Query('created_via') createdVia?: string,
+    @Query('storeId') storeId?: string,
+    @Query('store_id') storeIdSnake?: string,
+    @Headers('x-store-id') storeHeader?: string,
+  ) {
+    const criteria = this.orderLists.criteria({
+      page,
+      perPage,
+      status,
+      createdVia,
+      storeId: storeHeader || storeId || storeIdSnake,
+    });
+    const listed = await this.orderRepository.listOrders(criteria);
+    return this.orderLists.present(criteria.page, criteria.perPage, listed.total, listed.orders);
   }
 
   // --- 3. Get Single Order Detail with Items & State History ---

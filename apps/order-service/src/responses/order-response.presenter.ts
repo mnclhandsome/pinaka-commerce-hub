@@ -122,7 +122,7 @@ export class OrderResponsePresenter {
       date_created_gmt: gmtCreated,
       date_modified_gmt: gmtModified,
       date_completed_gmt: completedAt ? (request.date_completed_gmt || this.formatWooDate(updatedAt, 'UTC')) : null,
-      date_paid_gmt: paidAt ? (request.date_paid_gmt || this.formatWooDate(updatedAt, 'UTC')) : null,
+      date_paid_gmt: paidAt ? (request.date_paid_gmt || gmtCreated) : null,
       currency_symbol: request.currency_symbol || this.currencySymbol(currency),
       duplicate: result.duplicate,
       store_order_id: result.storeOrder?.id ?? null,
