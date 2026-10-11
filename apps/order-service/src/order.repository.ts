@@ -106,11 +106,6 @@ export class OrderRepository implements OnModuleInit {
             order.storeId === orderData.storeId && order.clientOrderId === clientOrderId,
           );
       if (existing) {
-        if (orderData.source === 'WORDPRESS_COMPATIBLE') {
-          throw new BadRequestException(
-            `An order with the same client order ID already exists (Order ID: ${existing.id}).`,
-          );
-        }
         const existingItems = this.isDbConnected && this.itemRepo
           ? await this.itemRepo.find({ where: { orderId: existing.id } })
           : this.inMemoryItems.filter(item => item.orderId === existing.id);
@@ -598,6 +593,49 @@ export class OrderRepository implements OnModuleInit {
     }
 
     return order;
+  }
+
+  async saveOrderMutation(input: {
+    order: OrderEntity;
+    items: OrderItemEntity[];
+    storeOrder: StoreOrderEntity | null;
+    replaceItems: boolean;
+    history?: { fromStatus: string; toStatus: string; changedBy: string; reason?: string };
+  }): Promise<{ order: OrderEntity; items: OrderItemEntity[]; storeOrder: StoreOrderEntity | null }> {
+    if (!this.isDbConnected || !this.dataSource) {
+      throw new ServiceUnavailableException('Order database is unavailable; the order was not updated');
+    }
+    const saved = await this.dataSource.transaction(async manager => {
+      const orderRepository = manager.getRepository(OrderEntity);
+      const itemRepository = manager.getRepository(OrderItemEntity);
+      const historyRepository = manager.getRepository(OrderStatusHistoryEntity);
+      const storeOrderRepository = manager.getRepository(StoreOrderEntity);
+      const persistedOrder = await orderRepository.save(orderRepository.create({ ...input.order }));
+      let persistedItems = input.items;
+      if (input.replaceItems) {
+        await itemRepository.delete({ orderId: input.order.id });
+        persistedItems = input.items.length
+          ? await itemRepository.save(input.items.map(item => itemRepository.create(item)))
+          : [];
+      }
+      const persistedStoreOrder = input.storeOrder
+        ? await storeOrderRepository.save(storeOrderRepository.create({ ...input.storeOrder }))
+        : null;
+      if (input.history) {
+        await historyRepository.save(historyRepository.create({
+          id: `HST-${randomUUID()}`,
+          orderId: input.order.id,
+          fromStatus: input.history.fromStatus,
+          toStatus: input.history.toStatus,
+          changedBy: input.history.changedBy || 'POS System',
+          reason: input.history.reason || 'Order update',
+          createdAt: new Date(),
+        }));
+      }
+      return { order: persistedOrder, items: persistedItems, storeOrder: persistedStoreOrder };
+    });
+    await this.cacheOrder(saved.order);
+    return saved;
   }
 
   async getOrdersByStore(storeId: string): Promise<OrderEntity[]> {
