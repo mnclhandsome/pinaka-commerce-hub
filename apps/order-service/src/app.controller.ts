@@ -2,6 +2,7 @@ import { Controller, Get, Post, Patch, Body, Param, Query, Headers, Inject, NotF
 import { OrderRepository } from './order.repository';
 import { OrderStatus, OrderType, PaymentMethod, PaymentStatus } from './entities/order.entity';
 import type { StoreOrderCalculationInput } from './calculations/store-order.calculations';
+import { OrderUpdatePresenter } from './modules/order-updates/order-update.presenter';
 import { OrderListPresenter } from './responses/order-list.presenter';
 import { OrderResponsePresenter } from './responses/order-response.presenter';
 
@@ -14,6 +15,8 @@ export class AppController {
     private readonly responses: OrderResponsePresenter,
     @Inject(OrderListPresenter)
     private readonly orderLists: OrderListPresenter,
+    @Inject(OrderUpdatePresenter)
+    private readonly orderDetails: OrderUpdatePresenter,
   ) {}
 
   @Get('health')
@@ -100,18 +103,15 @@ export class AppController {
 
   // --- 3. Get Single Order Detail with Items & State History ---
   @Get(':id')
-  async getOrderById(@Param('id') id: string) {
-    const data = await this.orderRepository.getOrderById(id);
-    if (!data) {
-      throw new NotFoundException(`Order '${id}' not found`);
-    }
-    return {
-      success: true,
-      order: data.order,
-      items: data.items,
-      history: data.history,
-      storeOrder: data.storeOrder,
-    };
+  async getOrderById(
+    @Param('id') id: string,
+    @Headers('x-store-id') storeHeader?: string,
+    @Query('storeId') storeId?: string,
+    @Query('store_id') storeIdSnake?: string,
+  ) {
+    const data = await this.orderRepository.getOrderDetails(id, storeHeader || storeId || storeIdSnake);
+    if (!data) throw new NotFoundException(`Order '${id}' not found`);
+    return this.orderDetails.present(data);
   }
 
   // --- 4. Update Order Status (State Machine Transition) ---

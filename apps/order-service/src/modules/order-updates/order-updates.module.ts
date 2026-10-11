@@ -29,5 +29,6 @@ import { OrderUpdateService } from './services/order-update.service';
     OrderResponsePresenter,
     OrderUpdatePresenter,
   ],
+  exports: [OrderUpdatePresenter],
 })
 export class OrderUpdatesModule {}
