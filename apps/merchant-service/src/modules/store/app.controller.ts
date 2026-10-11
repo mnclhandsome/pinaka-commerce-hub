@@ -439,6 +439,14 @@ export class AppController {
     return this.merchantRepository.findStoreProductBySku(store.id, sku);
   }
 
+  @Get('stores/:storeId/catalog/products/:sku')
+  getStoreProduct(
+    @Param('storeId') storeId: string,
+    @Param('sku') sku: string,
+  ) {
+    return this.getStoreProductBySku(storeId, sku);
+  }
+
   @Get('stores/:storeId/catalog')
   async getStoreCatalog(@Param('storeId') storeId: string) {
     const store = await this.merchantRepository.getStoreById(storeId);
