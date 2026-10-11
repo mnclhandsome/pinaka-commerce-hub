@@ -1,6 +1,6 @@
-import { BadRequestException, Injectable, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { DataSource, QueryFailedError, Repository } from 'typeorm';
+import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
 import Redis from 'ioredis';
 import { postgresConnectionOptions } from '@pinaka-delivery-hub/database';
 import { OrderEntity, OrderType, PaymentMethod, PaymentStatus, OrderStatus } from './entities/order.entity';
@@ -99,20 +99,7 @@ export class OrderRepository implements OnModuleInit {
       orderData.timezone = stores[0].timezone || 'UTC';
     }
     const clientOrderId = String(orderData.clientOrderId || '').trim() || undefined;
-    if (clientOrderId) {
-      const existing = this.isDbConnected && this.orderRepo
-        ? await this.orderRepo.findOne({ where: { storeId: orderData.storeId, clientOrderId } })
-        : this.inMemoryOrders.find(order =>
-            order.storeId === orderData.storeId && order.clientOrderId === clientOrderId,
-          );
-      if (existing) {
-        const existingItems = this.isDbConnected && this.itemRepo
-          ? await this.itemRepo.find({ where: { orderId: existing.id } })
-          : this.inMemoryItems.filter(item => item.orderId === existing.id);
-        const storeOrder = await this.findStoreOrder(existing.id);
-        return { order: existing, items: existingItems, storeOrder, duplicate: true };
-      }
-    }
+    if (clientOrderId) await this.rejectDuplicateClientOrder(orderData.storeId, clientOrderId);
     const id = randomUUID();
     const orderNumber = `#${Math.floor(1000 + Math.random() * 9000)}`;
 
@@ -200,6 +187,9 @@ export class OrderRepository implements OnModuleInit {
             'Invalid UUID identifier. Send shift_id as the UUID value returned by pos_shifts.',
           );
         }
+        if (error instanceof QueryFailedError && (error as any).driverError?.code === '23505' && clientOrderId) {
+          throw new ConflictException(`An order with client order ID '${clientOrderId}' already exists`);
+        }
         throw error;
       }
       await this.cacheOrder(savedOrder);
@@ -212,6 +202,15 @@ export class OrderRepository implements OnModuleInit {
       await this.cacheOrder(order);
       console.log(`🛍️ [Order Created (InMemory)] Order ${order.orderNumber} ($${order.totalAmount}) created for Store ${order.storeId}`);
       return { order, items, storeOrder, duplicate: false };
+    }
+  }
+
+  private async rejectDuplicateClientOrder(storeId: string, clientOrderId: string): Promise<void> {
+    const existing = this.isDbConnected && this.orderRepo
+      ? await this.orderRepo.findOne({ where: { storeId, clientOrderId } })
+      : this.inMemoryOrders.find(order => order.storeId === storeId && order.clientOrderId === clientOrderId);
+    if (existing) {
+      throw new ConflictException(`An order with client order ID '${clientOrderId}' already exists`);
     }
   }
 
@@ -479,11 +478,11 @@ export class OrderRepository implements OnModuleInit {
         updated_at timestamptz NOT NULL DEFAULT now()
       )
     `);
-    await this.dataSource.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS store_orders_store_client_order_uidx
-      ON public.store_orders (store_id, client_order_id)
-      WHERE client_order_id IS NOT NULL
-    `);
+    await this.ensureClientOrderUniqueIndex(
+      'store_orders_store_client_order_idx',
+      'store_orders_store_client_order_uidx',
+      'public.store_orders (store_id, client_order_id)',
+    );
     await this.dataSource.query(`
       CREATE INDEX IF NOT EXISTS store_orders_order_id_idx
       ON public.store_orders (order_id)
@@ -500,11 +499,29 @@ export class OrderRepository implements OnModuleInit {
         ADD COLUMN IF NOT EXISTS metadata jsonb,
         ADD COLUMN IF NOT EXISTS request_payload jsonb
     `);
-    await this.dataSource.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS orders_store_client_order_id_uidx
-      ON public.orders (store_id, client_order_id)
-      WHERE client_order_id IS NOT NULL
-    `);
+    await this.ensureClientOrderUniqueIndex(
+      'orders_store_client_order_id_idx',
+      'orders_store_client_order_id_uidx',
+      'public.orders (store_id, client_order_id)',
+    );
+  }
+
+  private async ensureClientOrderUniqueIndex(plainName: string, uniqueName: string, target: string): Promise<void> {
+    if (!this.dataSource) return;
+    try {
+      await this.dataSource.query(`DROP INDEX IF EXISTS public.${plainName}`);
+      await this.dataSource.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS ${uniqueName}
+        ON ${target}
+        WHERE client_order_id IS NOT NULL
+      `);
+    } catch (error) {
+      console.error(`Unique client order index ${uniqueName} was not created`, error);
+      await this.dataSource.query(`
+        CREATE INDEX IF NOT EXISTS ${plainName}
+        ON ${target}
+      `);
+    }
   }
 
   private async ensureOrderUuidSchema(): Promise<void> {
@@ -636,6 +653,146 @@ export class OrderRepository implements OnModuleInit {
     });
     await this.cacheOrder(saved.order);
     return saved;
+  }
+
+  async listOrders(criteria: {
+    storeId?: string;
+    page: number;
+    perPage: number;
+    statuses: string[];
+    createdVia?: string;
+  }): Promise<{
+    total: number;
+    orders: Array<{
+      order: OrderEntity;
+      storeOrder: StoreOrderEntity | null;
+      items: OrderItemEntity[];
+      products: Map<string, unknown>;
+    }>;
+  }> {
+    if (!this.isDbConnected || !this.dataSource || !this.orderRepo) {
+      throw new ServiceUnavailableException('Order database is unavailable');
+    }
+    const statuses = criteria.statuses.length ? criteria.statuses : null;
+    const createdVia = criteria.createdVia?.trim().toLowerCase() || null;
+    const storeId = criteria.storeId || null;
+    const params: unknown[] = [storeId, statuses, createdVia];
+    const where = `
+      FROM public.orders AS sale
+      LEFT JOIN public.store_orders AS store_sale ON store_sale.order_id = sale.id
+      WHERE ($1::uuid IS NULL OR sale.store_id = $1::uuid)
+        AND (
+          $2::text[] IS NULL
+          OR (
+            CASE
+              WHEN NULLIF(store_sale.status, '') IS NOT NULL THEN lower(store_sale.status)
+              WHEN upper(sale.order_status) = 'CANCELLED' THEN 'cancelled'
+              WHEN upper(sale.order_status) = 'COMPLETED' THEN 'completed'
+              WHEN upper(sale.order_status) = 'REFUNDED' THEN 'refunded'
+              ELSE 'processing'
+            END
+          ) = ANY($2::text[])
+        )
+        AND (
+          $3::text IS NULL
+          OR lower(COALESCE(
+            NULLIF(sale.request_payload->>'created_via', ''),
+            NULLIF((
+              SELECT entry->>'value'
+              FROM jsonb_array_elements(COALESCE(sale.metadata, '[]'::jsonb)) AS entry
+              WHERE entry->>'key' IN ('order_created_via', 'created_via')
+              LIMIT 1
+            ), ''),
+            'rest-api'
+          )) = $3
+        )
+    `;
+    let countRows: Array<{ total?: number }>;
+    let idRows: Array<{ id: string }>;
+    try {
+      countRows = await this.dataSource.query(`SELECT COUNT(*)::int AS total ${where}`, params);
+      idRows = await this.dataSource.query(
+        `SELECT sale.id ${where} ORDER BY sale.created_at DESC LIMIT $4 OFFSET $5`,
+        [...params, criteria.perPage, (criteria.page - 1) * criteria.perPage],
+      );
+    } catch (error: unknown) {
+      if (error instanceof QueryFailedError && (error as { driverError?: { code?: string } }).driverError?.code === '22P02') {
+        throw new BadRequestException('storeId must be a UUID');
+      }
+      throw error;
+    }
+    const total = Number(countRows[0]?.total || 0);
+    const ids = idRows.map((row) => row.id);
+    if (!ids.length) return { total, orders: [] };
+    const orders = await this.orderRepo.find({ where: { id: In(ids) } });
+    const storeOrders = this.storeOrderRepo
+      ? await this.storeOrderRepo.find({ where: { orderId: In(ids) } })
+      : [];
+    const items = this.itemRepo
+      ? await this.itemRepo.find({ where: { orderId: In(ids) } })
+      : [];
+    const ordersById = new Map(orders.map((order) => [order.id, order]));
+    const storeOrdersById = new Map(storeOrders.map((storeOrder) => [storeOrder.orderId, storeOrder]));
+    const rows = ids.flatMap((id) => {
+      const order = ordersById.get(id);
+      if (!order) return [];
+      return [{
+        order,
+        storeOrder: storeOrdersById.get(id) ?? null,
+        items: items.filter((item) => item.orderId === id),
+      }];
+    });
+    const products = await this.catalogProducts(rows);
+    return { total, orders: rows.map((row) => ({ ...row, products })) };
+  }
+
+  private async catalogProducts(
+    rows: Array<{ order: OrderEntity; storeOrder: StoreOrderEntity | null; items: OrderItemEntity[] }>,
+  ): Promise<Map<string, unknown>> {
+    const products = new Map<string, unknown>();
+    if (!this.dataSource) return products;
+    const idsByStore = new Map<string, Set<string>>();
+    rows.forEach((row) => {
+      const ids = idsByStore.get(row.order.storeId) ?? new Set<string>();
+      const lines = Array.isArray(row.storeOrder?.lineItems) && row.storeOrder.lineItems.length
+        ? row.storeOrder.lineItems
+        : row.items;
+      lines.forEach((line) => {
+        const record = line as { product_id?: unknown; productId?: unknown };
+        const productId = String(record?.product_id ?? record?.productId ?? '').trim();
+        if (productId) ids.add(productId);
+      });
+      if (ids.size) idsByStore.set(row.order.storeId, ids);
+    });
+    for (const [storeId, ids] of idsByStore) {
+      let found: Array<{ id?: string; product?: unknown }> = [];
+      try {
+        found = await this.dataSource.query(
+          `SELECT product->>'id' AS id, product
+           FROM public.store_products AS catalog
+           CROSS JOIN LATERAL jsonb_array_elements(
+             CASE
+               WHEN jsonb_typeof(catalog.payload) = 'array' THEN catalog.payload
+               ELSE '[]'::jsonb
+             END
+           ) AS product
+           WHERE catalog.store_id = $1::uuid
+             AND COALESCE(catalog.is_deleted, false) = false
+             AND product->>'id' = ANY($2::text[])`,
+          [storeId, [...ids]],
+        );
+      } catch (error: unknown) {
+        const code = error && typeof error === 'object'
+          ? (error as { driverError?: { code?: string } }).driverError?.code
+          : undefined;
+        if (code === '42P01' || code === '42703' || code === '22P02') continue;
+        throw error;
+      }
+      found.forEach((row) => {
+        if (row.id && row.product) products.set(`${storeId}:${row.id}`, row.product);
+      });
+    }
+    return products;
   }
 
   async getOrdersByStore(storeId: string): Promise<OrderEntity[]> {

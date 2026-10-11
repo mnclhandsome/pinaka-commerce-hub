@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { OrderPersistenceModule } from '../../order-persistence.module';
+import { OrderResponsePresenter } from '../../responses/order-response.presenter';
 import { OrderUpdatePresenter } from './order-update.presenter';
 import { OrderUpdatesController } from './order-updates.controller';
 import { OrderCancellationService } from './services/order-cancellation.service';
@@ -23,6 +24,7 @@ import { OrderUpdateService } from './services/order-update.service';
     OrderItemService,
     OrderCancellationService,
     OrderUpdateService,
+    OrderResponsePresenter,
     OrderUpdatePresenter,
   ],
 })
