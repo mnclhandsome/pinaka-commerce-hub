@@ -224,6 +224,26 @@ export class AddOrderItemsDto {
   tax?: TaxOverrideDto;
 }
 
+export class UpdateOrderCouponLineDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(100)
+  code!: string;
+}
+
+export class UpdateOrderDto {
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => UpdateOrderCouponLineDto)
+  coupon_lines?: UpdateOrderCouponLineDto[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  status?: string;
+}
+
 export class CancelOrderDto {
   @IsOptional()
   @IsString()

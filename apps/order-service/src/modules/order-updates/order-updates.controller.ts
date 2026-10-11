@@ -1,10 +1,37 @@
-import { Body, Controller, HttpCode, Inject, Param, ParseUUIDPipe, Post } from '@nestjs/common';
-import { AddOrderItemsDto, ApplyCouponDto, ApplyDiscountDto, CancelOrderDto } from './dto/order-update.dto';
+import { Body, Controller, HttpCode, Inject, Param, ParseUUIDPipe, Patch, Post, Put } from '@nestjs/common';
+import { AddOrderItemsDto, ApplyCouponDto, ApplyDiscountDto, CancelOrderDto, UpdateOrderDto } from './dto/order-update.dto';
 import { OrderUpdateService } from './services/order-update.service';
 
 @Controller(['api/v1/orders', 'connector/api/v1/orders'])
 export class OrderUpdatesController {
   constructor(@Inject(OrderUpdateService) private readonly updates: OrderUpdateService) {}
+
+  @Put(':id')
+  @HttpCode(200)
+  update(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() body: UpdateOrderDto,
+  ) {
+    return this.updates.update(id, body);
+  }
+
+  @Patch(':id')
+  @HttpCode(200)
+  updatePartial(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() body: UpdateOrderDto,
+  ) {
+    return this.updates.update(id, body);
+  }
+
+  @Post(':id')
+  @HttpCode(200)
+  updateByPost(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() body: UpdateOrderDto,
+  ) {
+    return this.updates.update(id, body);
+  }
 
   @Post(':id/coupons')
   @HttpCode(200)

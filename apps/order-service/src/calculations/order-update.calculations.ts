@@ -107,6 +107,19 @@ export function normalizeAddedLine(item: AddedLineInput, places = 2): OrderLine 
   return line;
 }
 
+const COUPON_BASE_KEY = '_pos_coupon_base';
+
+/** Restore the line total from before coupons so a later coupon replaces, rather than stacks on, the previous one. */
+export function withCouponBase(line: OrderLine, places = 2): OrderLine {
+  const meta = Array.isArray(line.meta_data) ? line.meta_data.map((entry) => ({ ...entry })) : [];
+  const existing = meta.find((entry) => entry?.key === COUPON_BASE_KEY);
+  const base = existing
+    ? moneyAmount(existing.value, places).toFixed(places)
+    : moneyAmount(line.total ?? line.subtotal ?? 0, places).toFixed(places);
+  if (!existing) meta.push({ key: COUPON_BASE_KEY, value: base });
+  return { ...line, total: base, meta_data: meta };
+}
+
 export function applyCoupon(
   lineItems: OrderLine[],
   coupon: CouponSpec,
