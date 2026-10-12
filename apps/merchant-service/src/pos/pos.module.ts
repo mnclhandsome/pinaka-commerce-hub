@@ -1,3 +1,5 @@
+import { DiscountController } from './Discount/discount.controller';
+import { DiscountService } from './Discount/discount.service';
 import { Module } from '@nestjs/common';
 import { PosCardPaymentController } from './card-payments/pos-card-payment.controller';
 import { PosCardPaymentService } from './card-payments/pos-card-payment.service';
@@ -25,6 +27,7 @@ import { MerchantModule } from '../modules/merchant/merchant.module';
 @Module({
   imports: [MerchantModule, PosEmployeeAttendanceModule],
   controllers: [
+    DiscountController,
     PosCurrencyTaxController,
     PosServiceChargeController,
     PosCashbackController,
@@ -37,6 +40,7 @@ import { MerchantModule } from '../modules/merchant/merchant.module';
     FastkeyController,
   ],
   providers: [
+    DiscountService,
     PosCurrencyTaxService,
     PosServiceChargeService,
     PosCashbackService,
