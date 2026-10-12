@@ -95,9 +95,7 @@ export class PosEmployeeAttendanceService implements OnModuleInit {
     }
 
     const hash = employee.loginPinHash?.trim();
-    const isScryptHash = !!hash && /^[^:]{1,64}:[a-f\d]{128}$/i.test(hash);
-    const isSha256Hash = !!hash && /^[a-f\d]{64}$/i.test(hash);
-    if ((!isScryptHash && !isSha256Hash) || hash === dto.pin.trim()) {
+    if (!hash) {
       throw new UnauthorizedException({
         success: false,
         message: 'Invalid employee credentials or merchant/store assignment',
@@ -105,6 +103,9 @@ export class PosEmployeeAttendanceService implements OnModuleInit {
     }
     let validPin = false;
     try {
+      // Keep attendance PIN validation aligned with POS login: employee-store
+      // PINs take precedence, and PinService supports the existing hash formats
+      // as well as legacy plain-text PINs.
       validPin = await this.pins.verify(dto.pin.trim(), hash);
     } catch {
       validPin = false;

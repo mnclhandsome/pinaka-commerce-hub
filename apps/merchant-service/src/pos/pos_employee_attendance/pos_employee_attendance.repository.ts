@@ -51,13 +51,17 @@ export class PosEmployeeAttendanceRepository {
               e.employee_code AS "employeeCode",
               e.first_name AS "firstName",
               e.last_name AS "lastName",
-              e.login_pin_hash AS "loginPinHash",
+              COALESCE(es.login_pin_hash, e.login_pin_hash) AS "loginPinHash",
               m.id::text AS "merchantId",
               s.id::text AS "storeId",
               s.store_name AS "storeName"
        FROM public.employees e
        JOIN public.merchants m ON m.id = e.merchant_id
        JOIN public.stores s ON s.merchant_id = m.id
+       LEFT JOIN public.employee_stores es
+         ON es.employee_id = e.id
+        AND es.store_id = s.id
+        AND upper(es.status) = 'ACTIVE'
        WHERE e.employee_code = $1
          AND e.status::text = 'ACTIVE'
          AND m.status = 'ACTIVE'
