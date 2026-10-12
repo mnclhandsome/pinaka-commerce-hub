@@ -53,12 +53,18 @@ export class SessionAuthGuard implements CanActivate {
     const payload = verifyAccessToken(token);
     const session = await this.merchants.touchSession(payload.jti!, token);
     if (!session) throw new UnauthorizedException('Session is not active. Please log in again.');
+    const scopedPayload = payload as typeof payload & {
+      merchantId?: string;
+      storeId?: string;
+    };
     request.user = {
       id: payload.sub,
       accountId: payload.accountId ?? session.accountId,
       email: payload.email ?? session.email,
       role: payload.role ?? session.role,
       sessionId: session.id,
+      merchantId: scopedPayload.merchantId ?? session.merchantId,
+      storeId: scopedPayload.storeId ?? session.storeId,
     };
     return true;
   }
