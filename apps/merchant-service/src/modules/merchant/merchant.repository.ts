@@ -3146,6 +3146,7 @@ export class MerchantRepository implements OnModuleInit {
     storeId: string,
     products: unknown[],
   ): Promise<void> {
+    await this.ensureStoreProductsStoreIdUniqueIndex();
     await this.dataSource.query(
       `INSERT INTO public.store_products (store_id, payload, updated_at)
        VALUES ($1::uuid, $2::jsonb, now())
@@ -3631,6 +3632,10 @@ export class MerchantRepository implements OnModuleInit {
       type: record.type ?? null,
       image: product.image ?? null,
       price: product.price ?? null,
+      regular_price: record.regular_price ?? null,
+      sale_price: record.sale_price ?? null,
+      tax_status: record.tax_status ?? null,
+      tax_class: record.tax_class ?? null,
       categoryId: Number(category.id),
       categoryName: category.name ?? null,
       stock_status: record.stock_status ?? null,

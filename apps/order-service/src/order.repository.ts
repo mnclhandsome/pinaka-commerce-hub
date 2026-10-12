@@ -98,6 +98,7 @@ export class OrderRepository implements OnModuleInit {
       orderData.currency = stores[0].currency || 'USD';
       orderData.timezone = stores[0].timezone || 'UTC';
     }
+    await this.enrichWooCommerceCreateOrder(orderData, sourcePayload);
     const clientOrderId = String(orderData.clientOrderId || '').trim() || undefined;
     if (clientOrderId) await this.rejectDuplicateClientOrder(orderData.storeId, clientOrderId);
     const id = randomUUID();
@@ -252,10 +253,11 @@ export class OrderRepository implements OnModuleInit {
       payLater: Boolean(metadata.find((entry: any) => entry?.key === '_pay_later')?.value),
       payLaterUserId,
       subtotal: sumLineSubtotals(lineItems),
-      discountTotal: 0,
-      feeTotal: 0,
-      taxTotal: 0,
-      total: sumLineTotals(lineItems),
+      discountTotal: Number(sourcePayload?.discount_total ?? orderData.discountAmount ?? 0),
+      feeTotal: (Array.isArray(sourcePayload?.fee_lines) ? sourcePayload.fee_lines : [])
+        .reduce((sum: number, fee: any) => sum + Number(fee?.total || 0), 0),
+      taxTotal: Number(sourcePayload?.total_tax ?? orderData.taxAmount ?? 0),
+      total: Number(sourcePayload?.total ?? orderData.totalAmount ?? sumLineTotals(lineItems)),
       lineItems,
       feeLines: Array.isArray(sourcePayload?.fee_lines) ? sourcePayload.fee_lines : [],
       couponLines: Array.isArray(sourcePayload?.coupon_lines) ? sourcePayload.coupon_lines : [],
@@ -265,6 +267,144 @@ export class OrderRepository implements OnModuleInit {
       createdAt: new Date(),
       updatedAt: new Date(),
     };
+  }
+
+  /**
+   * WooCommerce normally resolves a product id into its price and tax rules before
+   * creating an order. The compatibility endpoint must do the same because POS
+   * clients commonly send only product_id and quantity.
+   */
+  private async enrichWooCommerceCreateOrder(orderData: any, sourcePayload: any): Promise<void> {
+    const lines = Array.isArray(sourcePayload?.line_items) ? sourcePayload.line_items : null;
+    if (!lines || !this.dataSource || !orderData.storeId) return;
+
+    const productIds = [...new Set(lines
+      .map((line: any) => String(line?.product_id ?? '').trim())
+      .filter(Boolean))];
+    if (!productIds.length) return;
+
+    const productRows: Array<{ id?: string; product?: Record<string, unknown> }> = await this.dataSource.query(
+      `SELECT product->>'id' AS id, product
+         FROM public.store_products AS catalog
+         CROSS JOIN LATERAL jsonb_array_elements(
+           CASE
+             WHEN jsonb_typeof(catalog.payload) = 'array' THEN catalog.payload
+             WHEN jsonb_typeof(catalog.payload->'products') = 'array' THEN catalog.payload->'products'
+             ELSE '[]'::jsonb
+           END
+         ) AS product
+        WHERE catalog.store_id = $1::uuid
+          AND COALESCE(catalog.is_deleted, false) = false
+          AND product->>'id' = ANY($2::text[])`,
+      [orderData.storeId, productIds],
+    );
+    const products = new Map(productRows.map((row) => [String(row.id), row.product || {}]));
+    const unresolved = lines.filter((line: any) => {
+      const id = String(line?.product_id ?? '').trim();
+      const hasAmount = line?.total !== undefined || line?.subtotal !== undefined || line?.unitPrice !== undefined;
+      return id && !products.has(id) && !hasAmount;
+    });
+    if (unresolved.length) {
+      const ids = unresolved.map((line: any) => String(line.product_id)).join(', ');
+      throw new BadRequestException(
+        `Products ${ids} were not found in the store catalog. Sync the store products or send line subtotal/total explicitly.`,
+      );
+    }
+
+    let taxSetting: any = null;
+    let taxClasses: Array<{ name: string; rate: number | string }> = [];
+    try {
+      const settings = await this.dataSource.query(
+        `SELECT id, "taxEnabled", "defaultTaxRate", "taxCalculation", "decimalPlaces"
+           FROM public.pos_currency_tax_settings
+          WHERE "storeId" = $1
+          LIMIT 1`,
+        [orderData.storeId],
+      );
+      taxSetting = settings[0] || null;
+      if (taxSetting?.id) {
+        taxClasses = await this.dataSource.query(
+          `SELECT name, rate FROM public.pos_tax_classes WHERE "currencyTaxId" = $1 ORDER BY "sortOrder" ASC`,
+          [taxSetting.id],
+        );
+      }
+    } catch (error: unknown) {
+      const code = error && typeof error === 'object'
+        ? (error as { driverError?: { code?: string } }).driverError?.code
+        : undefined;
+      if (code !== '42P01' && code !== '42703') throw error;
+    }
+
+    const places = Number(taxSetting?.decimalPlaces ?? 2);
+    const factor = 10 ** places;
+    const classRates = new Map(taxClasses.map((entry) => [String(entry.name).trim().toLowerCase(), Number(entry.rate || 0)]));
+    const defaultRate = taxSetting?.taxEnabled === false ? 0 : Number(taxSetting?.defaultTaxRate || 0);
+    const explicitTax = sourcePayload.total_tax !== undefined || (Array.isArray(sourcePayload.tax_lines) && sourcePayload.tax_lines.length > 0);
+    const taxGroups = new Map<number, number>();
+
+    lines.forEach((line: any) => {
+      const product = products.get(String(line?.product_id ?? '').trim());
+      if (!product) return;
+      const quantity = Number(line.quantity || 1);
+      const price = Number(product.price ?? product.sale_price ?? product.regular_price ?? 0);
+      if (line.name === undefined) line.name = String(product.name || 'Sales Item');
+      if (line.subtotal === undefined) line.subtotal = (price * quantity).toFixed(places);
+      if (line.total === undefined) line.total = String(line.subtotal);
+      if (line.tax_class === undefined) line.tax_class = String(product.tax_class || '');
+
+      if (explicitTax) return;
+      const taxable = String(product.tax_status || '').toLowerCase() === 'taxable';
+      const taxClass = String(product.tax_class || '').trim().toLowerCase();
+      const rate = taxable ? (taxClass ? (classRates.get(taxClass) ?? defaultRate) : defaultRate) : 0;
+      const taxableMinor = Math.round(Number(line.total || 0) * factor);
+      const taxMinor = rate > 0 ? Math.round(taxableMinor * rate / 100) : 0;
+      line.subtotal_tax = (taxMinor / factor).toFixed(places);
+      line.total_tax = (taxMinor / factor).toFixed(places);
+      line.taxes = taxMinor ? [{ id: rate, total: line.total_tax, subtotal: line.subtotal_tax }] : [];
+      if (taxMinor) taxGroups.set(rate, (taxGroups.get(rate) || 0) + taxMinor);
+    });
+
+    if (!explicitTax) {
+      sourcePayload.tax_lines = [...taxGroups.entries()].map(([rate, minor], index) => ({
+        id: index + 1,
+        rate_code: `POS-TAX-${index + 1}`,
+        rate_id: index + 1,
+        label: 'Tax',
+        compound: false,
+        tax_total: (minor / factor).toFixed(places),
+        shipping_tax_total: (0).toFixed(places),
+        rate_percent: rate,
+        meta_data: [],
+      }));
+      sourcePayload.total_tax = ([...taxGroups.values()].reduce((sum, minor) => sum + minor, 0) / factor).toFixed(places);
+      sourcePayload.cart_tax = sourcePayload.total_tax;
+    }
+
+    const subtotal = lines.reduce((sum: number, line: any) => sum + Number(line.subtotal ?? line.total ?? 0), 0);
+    const lineTotal = lines.reduce((sum: number, line: any) => sum + Number(line.total ?? line.subtotal ?? 0), 0);
+    const feeTotal = (Array.isArray(sourcePayload.fee_lines) ? sourcePayload.fee_lines : [])
+      .reduce((sum: number, fee: any) => sum + Number(fee?.total || 0), 0);
+    const taxTotal = Number(sourcePayload.total_tax || 0);
+    const shippingTotal = Number(sourcePayload.shipping_total || 0);
+    if (sourcePayload.subtotal === undefined) sourcePayload.subtotal = subtotal.toFixed(places);
+    if (sourcePayload.total === undefined) sourcePayload.total = (lineTotal + feeTotal + taxTotal + shippingTotal).toFixed(places);
+
+    orderData.items = lines.map((line: any) => {
+      const quantity = Number(line.quantity || 1);
+      const total = Number(line.total ?? line.subtotal ?? 0);
+      return {
+        productId: String(line.product_id ?? ''),
+        productName: line.name || 'Sales Item',
+        quantity,
+        unitPrice: quantity ? Number(line.subtotal ?? total) / quantity : 0,
+        totalPrice: total,
+        modifiers: Array.isArray(line.meta_data) ? line.meta_data : [],
+      };
+    });
+    orderData.subtotal = subtotal;
+    orderData.taxAmount = taxTotal;
+    orderData.totalAmount = Number(sourcePayload.total);
+    orderData.requestPayload = sourcePayload;
   }
 
   private async findStoreOrder(orderId: string): Promise<StoreOrderEntity | null> {
@@ -773,6 +913,7 @@ export class OrderRepository implements OnModuleInit {
            CROSS JOIN LATERAL jsonb_array_elements(
              CASE
                WHEN jsonb_typeof(catalog.payload) = 'array' THEN catalog.payload
+               WHEN jsonb_typeof(catalog.payload->'products') = 'array' THEN catalog.payload->'products'
                ELSE '[]'::jsonb
              END
            ) AS product

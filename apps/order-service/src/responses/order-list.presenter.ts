@@ -84,6 +84,7 @@ export class OrderListPresenter {
       coupon_lines: Array.isArray(storeOrder?.couponLines) ? storeOrder.couponLines : [],
       line_items: lineItems,
       fee_lines: Array.isArray(storeOrder?.feeLines) ? storeOrder.feeLines : [],
+      tax_lines: Array.isArray(storeOrder?.taxLines) ? storeOrder.taxLines : [],
       refund_order_total: totalNumber,
       refund_total: 0,
       net_payment: totalNumber,
