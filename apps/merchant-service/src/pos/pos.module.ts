@@ -20,6 +20,8 @@ import { PosTerminalMappingService } from './terminal-mappings/pos-terminal-mapp
 import { FastkeyController } from './fastkeys/fastkey.controller';
 import { FastkeyService } from './fastkeys/fastkey.service';
 import { MerchantModule } from '../modules/merchant/merchant.module';
+import { PosSafeTransactionsController } from './safe-transactions/pos-safe-transactions.controller';
+import { PosSafeTransactionsService } from './safe-transactions/pos-safe-transactions.service';
 
 @Module({
   imports: [MerchantModule],
@@ -31,6 +33,7 @@ import { MerchantModule } from '../modules/merchant/merchant.module';
     PosCashDenominationController,
     PosCashRegisterController,
     PosSafeDropController,
+    PosSafeTransactionsController,
     PosCardPaymentController,
     PosTerminalMappingController,
     FastkeyController,
@@ -43,6 +46,7 @@ import { MerchantModule } from '../modules/merchant/merchant.module';
     PosCashDenominationService,
     PosCashRegisterService,
     PosSafeDropService,
+    PosSafeTransactionsService,
     PosCardPaymentService,
     PosTerminalMappingService,
     FastkeyService,

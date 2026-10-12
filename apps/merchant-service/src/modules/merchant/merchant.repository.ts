@@ -123,6 +123,9 @@ import { PosCashRegisterEntity } from '../../pos/cash-registers/pos-cash-registe
 import { PosSafeDropEntity } from '../../pos/safe-drop/pos-safe-drop.entity';
 import { PosSafeDropTubeEntity } from '../../pos/safe-drop/pos-safe-drop-tube.entity';
 import { PosSafeDropDenominationEntity } from '../../pos/safe-drop/pos-safe-drop-denomination.entity';
+import { ensurePosSafeDropSchema } from '../../pos/safe-drop/pos-safe-drop.schema';
+import { PosSafeTransactionEntity } from '../../pos/safe-transactions/pos-safe-transaction.entity';
+import { PosSafeDropTransactionEntity } from '../../pos/safe-transactions/pos-safe-drop-transaction.entity';
 import { PosCardPaymentEntity } from '../../pos/card-payments/pos-card-payment.entity';
 import { PosTerminalMappingSettingsEntity } from '../../pos/terminal-mappings/pos-terminal-mapping-settings.entity';
 import { PosTerminalMappingEntity } from '../../pos/terminal-mappings/pos-terminal-mapping.entity';
@@ -721,6 +724,8 @@ export class MerchantRepository implements OnModuleInit {
         PosSafeDropEntity,
         PosSafeDropTubeEntity,
         PosSafeDropDenominationEntity,
+        PosSafeTransactionEntity,
+        PosSafeDropTransactionEntity,
         PosCardPaymentEntity,
         PosTerminalMappingSettingsEntity,
         PosTerminalMappingEntity,
@@ -744,6 +749,7 @@ export class MerchantRepository implements OnModuleInit {
     // re-adds columns, and PostgreSQL counts those dropped columns until startup
     // dies with "tables can have at most 1600 columns".
     const createdTables = await createMissingTables(this.dataSource);
+    await ensurePosSafeDropSchema(this.dataSource);
     if (createdTables.length) {
       console.log(
         `🐘 [PCH Merchant DB] Created missing tables: ${createdTables.join(', ')}`,
@@ -2209,13 +2215,15 @@ export class MerchantRepository implements OnModuleInit {
     if (!isUuid || sessionId?.startsWith('sess_')) {
       try {
         const empSessions = await this.dataSource.query(
-          `SELECT id, employee_id AS "accountId", status FROM public.employee_sessions WHERE (id::text = $1 OR access_token = $2) AND status = 'Active' LIMIT 1`,
+          `SELECT id, employee_id AS "accountId", store_id AS "storeId", merchant_id AS "merchantId", status FROM public.employee_sessions WHERE (id::text = $1 OR access_token = $2) AND status = 'Active' LIMIT 1`,
           [sessionId, accessToken],
         );
         if (empSessions[0]) {
           return {
             id: empSessions[0].id,
             accountId: empSessions[0].accountId,
+            storeId: empSessions[0].storeId,
+            merchantId: empSessions[0].merchantId,
             email: 'employee@pch.com',
             role: 'CASHIER',
           };
