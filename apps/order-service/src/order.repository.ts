@@ -314,19 +314,18 @@ export class OrderRepository implements OnModuleInit {
     let taxSetting: any = null;
     let taxClasses: Array<{ name: string; rate: number | string }> = [];
     try {
-      const settings = await this.dataSource.query(
-        `SELECT id, "taxEnabled", "defaultTaxRate", "taxCalculation", "decimalPlaces"
-           FROM public.pos_currency_tax_settings
-          WHERE "storeId" = $1
+      const configurations: Array<{ configuration_value?: Record<string, any> }> = await this.dataSource.query(
+        `SELECT configuration_value
+           FROM public.store_pos_configurations
+          WHERE store_id = $1::uuid
+            AND configuration_name = 'currency_taxes'
           LIMIT 1`,
         [orderData.storeId],
       );
-      taxSetting = settings[0] || null;
-      if (taxSetting?.id) {
-        taxClasses = await this.dataSource.query(
-          `SELECT name, rate FROM public.pos_tax_classes WHERE "currencyTaxId" = $1 ORDER BY "sortOrder" ASC`,
-          [taxSetting.id],
-        );
+      const configured = configurations[0]?.configuration_value;
+      if (configured && typeof configured === 'object') {
+        taxSetting = configured;
+        taxClasses = Array.isArray(configured.taxClasses) ? configured.taxClasses : [];
       }
     } catch (error: unknown) {
       const code = error && typeof error === 'object'
@@ -335,9 +334,35 @@ export class OrderRepository implements OnModuleInit {
       if (code !== '42P01' && code !== '42703') throw error;
     }
 
+    // Backward compatibility for stores that still use the dedicated tax endpoint.
+    if (!taxSetting) {
+      try {
+        const settings = await this.dataSource.query(
+          `SELECT id, "taxEnabled", "defaultTaxRate", "taxCalculation", "decimalPlaces"
+             FROM public.pos_currency_tax_settings
+            WHERE "storeId" = $1
+            LIMIT 1`,
+          [orderData.storeId],
+        );
+        taxSetting = settings[0] || null;
+        if (taxSetting?.id) {
+          taxClasses = await this.dataSource.query(
+            `SELECT name, rate FROM public.pos_tax_classes WHERE "currencyTaxId" = $1 ORDER BY "sortOrder" ASC`,
+            [taxSetting.id],
+          );
+        }
+      } catch (error: unknown) {
+        const code = error && typeof error === 'object'
+          ? (error as { driverError?: { code?: string } }).driverError?.code
+          : undefined;
+        if (code !== '42P01' && code !== '42703') throw error;
+      }
+    }
+
     const places = Number(taxSetting?.decimalPlaces ?? 2);
     const factor = 10 ** places;
-    const classRates = new Map(taxClasses.map((entry) => [String(entry.name).trim().toLowerCase(), Number(entry.rate || 0)]));
+    const taxClassKey = (value: unknown) => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const classRates = new Map(taxClasses.map((entry) => [taxClassKey(entry.name), Number(entry.rate || 0)]));
     const defaultRate = taxSetting?.taxEnabled === false ? 0 : Number(taxSetting?.defaultTaxRate || 0);
     const explicitTax = sourcePayload.total_tax !== undefined || (Array.isArray(sourcePayload.tax_lines) && sourcePayload.tax_lines.length > 0);
     const taxGroups = new Map<number, number>();
@@ -354,7 +379,7 @@ export class OrderRepository implements OnModuleInit {
 
       if (explicitTax) return;
       const taxable = String(product.tax_status || '').toLowerCase() === 'taxable';
-      const taxClass = String(product.tax_class || '').trim().toLowerCase();
+      const taxClass = taxClassKey(product.tax_class);
       const rate = taxable ? (taxClass ? (classRates.get(taxClass) ?? defaultRate) : defaultRate) : 0;
       const taxableMinor = Math.round(Number(line.total || 0) * factor);
       const taxMinor = rate > 0 ? Math.round(taxableMinor * rate / 100) : 0;
