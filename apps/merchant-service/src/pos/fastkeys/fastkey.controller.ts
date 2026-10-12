@@ -28,7 +28,7 @@ import { FastkeyService } from './fastkey.service';
 type AuthenticatedRequest = {
   protocol?: string;
   headers?: Record<string, string | string[] | undefined>;
-  user?: { id?: string };
+  user?: { id?: string; storeId?: string };
   get(name: string): string | undefined;
 };
 
@@ -88,7 +88,7 @@ export class FastkeyController {
         imagePath = await this.saveImage(file);
         dto.fastkey_image = `${origin}${imagePath}`;
       }
-      return await this.service.create(dto, request.user?.id, origin);
+      return await this.service.create(dto, request.user?.id, origin, request.user?.storeId);
     } catch (error) {
       if (imagePath) await this.removeImage(imagePath);
       throw error;
@@ -111,7 +111,7 @@ export class FastkeyController {
         imagePath = await this.saveImage(file);
         dto.fastkey_image = `${origin}${imagePath}`;
       }
-      const result = await this.service.update(dto, request.user?.id, origin);
+      const result = await this.service.update(dto, request.user?.id, origin, request.user?.storeId);
       if (imagePath && result.previousImage) {
         await this.removeImage(result.previousImage);
       }
@@ -128,6 +128,7 @@ export class FastkeyController {
     return this.service.getByUser(
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 
@@ -150,6 +151,7 @@ export class FastkeyController {
       fastkeyId,
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 
@@ -159,7 +161,7 @@ export class FastkeyController {
     @Param('fastkey_id') fastkeyId: string | undefined,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.service.delete(fastkeyId, request.user?.id);
+    return this.service.delete(fastkeyId, request.user?.id, request.user?.storeId);
   }
 
   @Post(['delete-product', 'delete_product'])
@@ -169,7 +171,7 @@ export class FastkeyController {
     @Body() dto: DeleteFastkeyProductDto,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.service.deleteProduct(dto, request.user?.id);
+    return this.service.deleteProduct(dto, request.user?.id, request.user?.storeId);
   }
 
   @Post(['add-products', 'add_products', 'fastkeys/add-products'])
@@ -183,6 +185,7 @@ export class FastkeyController {
       dto,
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 
@@ -201,6 +204,7 @@ export class FastkeyController {
       dto,
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 
