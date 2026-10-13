@@ -12,10 +12,6 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { unlink, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
 import { RequireAuth } from '../../modules/shared/session-auth.guard';
 import {
   AddFastkeyProductsDto,
@@ -23,19 +19,17 @@ import {
   DeleteFastkeyProductDto,
   UpdateFastkeyDto,
 } from './fastkey.dto';
-import { FastkeyService } from './fastkey.service';
+import { FastkeyService, UploadedBinary } from './fastkey.service';
 
 type AuthenticatedRequest = {
   protocol?: string;
   headers?: Record<string, string | string[] | undefined>;
-  user?: { id?: string };
+  user?: { id?: string; storeId?: string };
   get(name: string): string | undefined;
 };
 
-type UploadedFastkeyImage = { buffer: Buffer; mimetype: string };
+type UploadedFastkeyImage = UploadedBinary;
 
-const fastkeyImageDirectory = join(process.cwd(), 'uploads', 'fastkeys');
-mkdirSync(fastkeyImageDirectory, { recursive: true });
 const { memoryStorage } = require('multer');
 const fastkeyImageUpload = FileInterceptor('fastkey_image', {
   storage: memoryStorage(),
@@ -81,18 +75,13 @@ export class FastkeyController {
     @Req() request: AuthenticatedRequest,
     @UploadedFile() file?: UploadedFastkeyImage,
   ) {
-    const origin = this.requestOrigin(request);
-    let imagePath: string | undefined;
-    try {
-      if (file) {
-        imagePath = await this.saveImage(file);
-        dto.fastkey_image = `${origin}${imagePath}`;
-      }
-      return await this.service.create(dto, request.user?.id, origin);
-    } catch (error) {
-      if (imagePath) await this.removeImage(imagePath);
-      throw error;
-    }
+    return this.service.create(
+      dto,
+      request.user?.id,
+      this.requestOrigin(request),
+      file,
+      request.user?.storeId,
+    );
   }
 
   @Post(['update-fastkey', 'update', 'update-fastkeys'])
@@ -104,22 +93,14 @@ export class FastkeyController {
     @Req() request: AuthenticatedRequest,
     @UploadedFile() file?: UploadedFastkeyImage,
   ) {
-    const origin = this.requestOrigin(request);
-    let imagePath: string | undefined;
-    try {
-      if (file) {
-        imagePath = await this.saveImage(file);
-        dto.fastkey_image = `${origin}${imagePath}`;
-      }
-      const result = await this.service.update(dto, request.user?.id, origin);
-      if (imagePath && result.previousImage) {
-        await this.removeImage(result.previousImage);
-      }
-      return result.response;
-    } catch (error) {
-      if (imagePath) await this.removeImage(imagePath);
-      throw error;
-    }
+    const result = await this.service.update(
+      dto,
+      request.user?.id,
+      this.requestOrigin(request),
+      file,
+      request.user?.storeId,
+    );
+    return result.response;
   }
 
   @Get(['get-by-user', 'get-by-uesr', 'get_by_user'])
@@ -128,6 +109,7 @@ export class FastkeyController {
     return this.service.getByUser(
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 
@@ -150,6 +132,7 @@ export class FastkeyController {
       fastkeyId,
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 
@@ -159,7 +142,7 @@ export class FastkeyController {
     @Param('fastkey_id') fastkeyId: string | undefined,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.service.delete(fastkeyId, request.user?.id);
+    return this.service.delete(fastkeyId, request.user?.id, request.user?.storeId);
   }
 
   @Post(['delete-product', 'delete_product'])
@@ -169,7 +152,7 @@ export class FastkeyController {
     @Body() dto: DeleteFastkeyProductDto,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.service.deleteProduct(dto, request.user?.id);
+    return this.service.deleteProduct(dto, request.user?.id, request.user?.storeId);
   }
 
   @Post(['add-products', 'add_products', 'fastkeys/add-products'])
@@ -183,6 +166,7 @@ export class FastkeyController {
       dto,
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 
@@ -201,6 +185,7 @@ export class FastkeyController {
       dto,
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 
@@ -215,32 +200,5 @@ export class FastkeyController {
       request.get('host') ||
       'localhost:3003';
     return `${protocol}://${host}`;
-  }
-
-  private async saveImage(file: UploadedFastkeyImage): Promise<string> {
-    const extension =
-      file.mimetype === 'image/png'
-        ? '.png'
-        : file.mimetype === 'image/webp'
-          ? '.webp'
-          : '.jpg';
-    const filename = `${randomUUID()}${extension}`;
-    await writeFile(join(fastkeyImageDirectory, filename), file.buffer);
-    return `/uploads/fastkeys/${filename}`;
-  }
-
-  private async removeImage(imagePath: string): Promise<void> {
-    let pathname = imagePath;
-    try {
-      if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
-        pathname = new URL(imagePath).pathname;
-      }
-    } catch {
-      return;
-    }
-    if (!pathname.startsWith('/uploads/fastkeys/')) return;
-    const filename = basename(pathname);
-    if (filename === 'no-image.png' || filename === 'no-image-2.png') return;
-    await unlink(join(fastkeyImageDirectory, filename)).catch(() => undefined);
   }
 }

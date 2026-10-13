@@ -9,7 +9,8 @@ import { existsSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { MerchantRepository } from '../../modules/merchant/merchant.repository';
-import { EmployeeEntity } from '../../entities/employee.entity';
+import { FileStorageService } from '../../modules/file-storage/file-storage.service';
+import { MerchantEntity } from '../../entities/merchant.entity';
 import { StoreEntity } from '../../entities/store.entity';
 import {
   AddFastkeyProductsDto,
@@ -21,18 +22,29 @@ import { StoreEmployeeFastkeyEntity } from './store-employee-fastkey.entity';
 
 type FastkeyContext = { employee_id: string; store_id: string };
 type StoreProduct = Record<string, unknown> & { id: string | number };
+type FolderScope = { merchantName: string; storeName: string };
+
+export type UploadedBinary = {
+  buffer: Buffer;
+  mimetype: string;
+  originalname?: string;
+};
 
 @Injectable()
 export class FastkeyService {
   constructor(
     @Inject(MerchantRepository)
     private readonly merchants: MerchantRepository,
+    @Inject(FileStorageService)
+    private readonly files: FileStorageService,
   ) {}
 
   async create(
     dto: CreateFastkeyDto,
     userId: string | undefined,
     origin: string,
+    file?: UploadedBinary,
+    storeId?: string,
   ) {
     const title = String(dto.fastkey_title ?? '').trim();
     if (!title) {
@@ -42,12 +54,12 @@ export class FastkeyService {
     if (!userId) throw new UnauthorizedException('Authentication is required');
 
     const fastkeyIndex = this.toWordPressInteger(dto.fastkey_index);
-    const image =
-      String(dto.fastkey_image ?? '').trim() ||
+    const db = this.merchants.requireDataSource();
+    const context = await this.resolveContext(userId, storeId);
+    const fallback =
       process.env.FASTKEY_DEFAULT_IMAGE_URL?.trim() ||
       `${origin}/uploads/fastkeys/no-image-2.png`;
-    const db = this.merchants.requireDataSource();
-    const context = await this.resolveContext();
+    let image = String(dto.fastkey_image ?? '').trim() || fallback;
 
     const repository = db.getRepository(StoreEmployeeFastkeyEntity);
     const existing = await repository.find({
@@ -74,6 +86,9 @@ export class FastkeyService {
       );
     }
 
+    const stored = await this.persistUploadedImage(context.store_id, file, origin);
+    if (stored) image = stored.image;
+
     try {
       const saved = await repository.save(
         repository.create({
@@ -93,6 +108,7 @@ export class FastkeyService {
         fastkey_image: image,
       };
     } catch (error) {
+      if (stored) await this.files.removeStoredFile(stored.url, stored.scope);
       if (this.postgresCode(error) === '23505') {
         throw new HttpException(
           {
@@ -110,10 +126,10 @@ export class FastkeyService {
     }
   }
 
-  async getByUser(userId: string | undefined, origin: string) {
+  async getByUser(userId: string | undefined, origin: string, storeId?: string) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
 
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const rows = await this.merchants
       .requireDataSource()
       .getRepository(StoreEmployeeFastkeyEntity)
@@ -206,6 +222,7 @@ export class FastkeyService {
     fastkeyId: string | undefined,
     userId: string | undefined,
     origin: string,
+    storeId?: string,
   ) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
 
@@ -217,7 +234,7 @@ export class FastkeyService {
       );
     }
 
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const repository = this.merchants
       .requireDataSource()
       .getRepository(StoreEmployeeFastkeyEntity);
@@ -260,7 +277,7 @@ export class FastkeyService {
     };
   }
 
-  async delete(fastkeyId: string | undefined, userId: string | undefined) {
+  async delete(fastkeyId: string | undefined, userId: string | undefined, storeId?: string) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
 
     const id = String(fastkeyId ?? '').trim();
@@ -271,7 +288,7 @@ export class FastkeyService {
       );
     }
 
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const repository = this.merchants
       .requireDataSource()
       .getRepository(StoreEmployeeFastkeyEntity);
@@ -312,6 +329,7 @@ export class FastkeyService {
   async deleteProduct(
     dto: DeleteFastkeyProductDto,
     userId: string | undefined,
+    storeId?: string,
   ) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
 
@@ -327,7 +345,7 @@ export class FastkeyService {
       );
     }
 
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const repository = this.merchants
       .requireDataSource()
       .getRepository(StoreEmployeeFastkeyEntity);
@@ -372,6 +390,8 @@ export class FastkeyService {
     dto: UpdateFastkeyDto,
     userId: string | undefined,
     origin: string,
+    file?: UploadedBinary,
+    storeId?: string,
   ) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
     if (!dto.fastkey_id) {
@@ -379,7 +399,7 @@ export class FastkeyService {
     }
 
     const db = this.merchants.requireDataSource();
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const repository = db.getRepository(StoreEmployeeFastkeyEntity);
     const fastkey = await repository.findOne({
       where: { id: dto.fastkey_id, isDeleted: false },
@@ -428,7 +448,10 @@ export class FastkeyService {
     }
 
     const previousImage = fastkey.fastkeyImage;
-    await db.transaction(async (manager) => {
+    const stored = await this.persistUploadedImage(context.store_id, file, origin);
+    if (stored) dto.fastkey_image = stored.image;
+    try {
+      await db.transaction(async (manager) => {
       const transactionalRepository = manager.getRepository(
         StoreEmployeeFastkeyEntity,
       );
@@ -472,8 +495,15 @@ export class FastkeyService {
         await transactionalRepository.save(current);
       }
     });
+    } catch (error) {
+      if (stored) await this.files.removeStoredFile(stored.url, stored.scope);
+      throw error;
+    }
 
     const saved = await repository.findOneOrFail({ where: { id: fastkey.id } });
+    if (stored && previousImage && previousImage !== saved.fastkeyImage) {
+      await this.files.removeUpload(previousImage);
+    }
     return {
       previousImage:
         saved.fastkeyImage !== previousImage ? previousImage : undefined,
@@ -494,6 +524,7 @@ export class FastkeyService {
     dto: AddFastkeyProductsDto,
     userId: string | undefined,
     origin: string,
+    storeId?: string,
   ) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
     if (
@@ -510,7 +541,7 @@ export class FastkeyService {
     const requestedProducts = dto.products;
 
     const db = this.merchants.requireDataSource();
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const fastkeyRepository = db.getRepository(StoreEmployeeFastkeyEntity);
     const fastkey = await fastkeyRepository.findOne({
       where: {
@@ -589,6 +620,7 @@ export class FastkeyService {
     dto: AddFastkeyProductsDto,
     userId: string | undefined,
     origin: string,
+    storeId?: string,
   ) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
     if (
@@ -603,7 +635,7 @@ export class FastkeyService {
     }
 
     const db = this.merchants.requireDataSource();
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const fastkeyRepository = db.getRepository(StoreEmployeeFastkeyEntity);
     const fastkey = await fastkeyRepository.findOne({
       where: {
@@ -668,25 +700,36 @@ export class FastkeyService {
     };
   }
 
-  private async resolveContext(): Promise<FastkeyContext> {
+  private async resolveContext(
+    userId: string,
+    storeId?: string,
+  ): Promise<FastkeyContext> {
+    if (!storeId) {
+      throw new UnauthorizedException(
+        'A POS employee access token with store context is required',
+      );
+    }
     const db = this.merchants.requireDataSource();
-    const [employee] = await db.getRepository(EmployeeEntity).find({
-      order: { createdAt: 'ASC' },
-      select: { id: true },
-      take: 1,
-    });
-    if (!employee) {
-      throw new ForbiddenException('No employee record is available');
+    const rows = await db.query(
+      `SELECT e.id::text AS employee_id, es.store_id::text AS store_id
+       FROM public.employees e
+       JOIN public.employee_stores es ON es.employee_id = e.id
+       JOIN public.stores s ON s.id = es.store_id
+       WHERE e.id::text = $1
+         AND es.store_id::text = $2
+         AND (e.status IS NULL OR UPPER(e.status::text) <> 'INACTIVE')
+         AND (es.status IS NULL OR UPPER(es.status::text) <> 'INACTIVE')
+         AND (s.status IS NULL OR UPPER(s.status::text) <> 'INACTIVE')
+       LIMIT 1`,
+      [userId, storeId],
+    );
+    const context = rows[0] as FastkeyContext | undefined;
+    if (!context) {
+      throw new ForbiddenException(
+        'The logged-in employee is not assigned to this store',
+      );
     }
-    const [store] = await db.getRepository(StoreEntity).find({
-      order: { createdAt: 'ASC' },
-      select: { id: true },
-      take: 1,
-    });
-    if (!store) {
-      throw new ForbiddenException('No store record is available');
-    }
-    return { employee_id: employee.id, store_id: store.id };
+    return context;
   }
 
   private toWordPressInteger(value: string | undefined): number {
@@ -807,6 +850,46 @@ export class FastkeyService {
       10,
     );
     return Number.isFinite(configured) && configured > 0 ? configured : 309;
+  }
+
+  private async persistUploadedImage(
+    storeId: string,
+    file: UploadedBinary | undefined,
+    origin: string,
+  ): Promise<{ image: string; url: string; scope: FolderScope } | undefined> {
+    if (!file) return undefined;
+    const scope = await this.scopeForStore(storeId);
+    const saved = await this.files.saveStoreFile({
+      merchantName: scope.merchantName,
+      storeName: scope.storeName,
+      filename: file.originalname || 'fastkey',
+      buffer: file.buffer,
+      mimeType: file.mimetype,
+    });
+    return {
+      image: saved.url.startsWith('http') ? saved.url : `${origin}${saved.url}`,
+      url: saved.url,
+      scope,
+    };
+  }
+
+  private async scopeForStore(storeId: string): Promise<FolderScope> {
+    const db = this.merchants.requireDataSource();
+    const store = await db.getRepository(StoreEntity).findOne({
+      where: { id: storeId },
+    });
+    if (!store) throw new ForbiddenException('No store record is available');
+    const merchant = await db.getRepository(MerchantEntity).findOne({
+      where: { id: store.merchantId },
+    });
+    return {
+      merchantName:
+        merchant?.businessDisplayName ||
+        merchant?.merchantCode ||
+        merchant?.merchantId ||
+        'merchant',
+      storeName: store.storeName || 'store',
+    };
   }
 
   private postgresCode(error: unknown): string | undefined {
