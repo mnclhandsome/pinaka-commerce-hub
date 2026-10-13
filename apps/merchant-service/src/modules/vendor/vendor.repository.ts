@@ -198,7 +198,13 @@ export class VendorRepository {
     const db = this.merchants.requireDataSource();
     const params: unknown[] = [merchantUuid];
     let sql = `
-      SELECT v.*, mv.status AS "assignmentStatus", mv.id AS "assignmentId", true AS assigned
+      SELECT v.*, mv.status AS "assignmentStatus", mv.id AS "assignmentId", true AS assigned,
+             (SELECT COUNT(DISTINCT vs.store_id)::int
+              FROM public.vendor_stores vs
+              WHERE vs.vendor_id = v.id
+                AND vs.merchant_id = mv.merchant_id
+                AND vs.status = 'ACTIVE'
+                AND vs.is_mapped = true) AS "assignedStoreCount"
       FROM public.merchant_vendors mv
       JOIN public.vendors v ON v.id = mv.vendor_id
       WHERE mv.merchant_id = $1

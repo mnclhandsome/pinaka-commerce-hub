@@ -55,4 +55,14 @@ export class StoreVendorMappingRepository {
     );
     return mapping ?? null;
   }
+
+  async deactivateByStoreAndVendor(storeId: string, vendorId: string) {
+    const [mapping] = await this.merchants.requireDataSource().query(
+      `UPDATE public.vendor_stores SET status = 'INACTIVE', is_mapped = false, updated_at = now()
+       WHERE store_id = $1::uuid AND vendor_id = $2::uuid AND status = 'ACTIVE' AND is_mapped = true
+       RETURNING id, merchant_id, vendor_id, store_id, status, is_mapped, created_at, updated_at`,
+      [storeId, vendorId],
+    );
+    return mapping ?? null;
+  }
 }

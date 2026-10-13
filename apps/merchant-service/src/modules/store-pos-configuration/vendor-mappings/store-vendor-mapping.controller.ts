@@ -25,4 +25,17 @@ export class StoreVendorMappingController {
   async unmap(@Param('id', new ParseUUIDPipe()) id: string) {
     return { success: true, message: 'Vendor unmapped from store', mapping: await this.service.unmap(id) };
   }
+
+  @Delete()
+  @RequireAuth()
+  async unmapByStoreAndVendor(
+    @Query('store_id', new ParseUUIDPipe()) storeId: string,
+    @Query('vendor_id', new ParseUUIDPipe()) vendorId: string,
+  ) {
+    return {
+      success: true,
+      message: 'Vendor unmapped from store',
+      mapping: await this.service.unmapByStoreAndVendor(storeId, vendorId),
+    };
+  }
 }
