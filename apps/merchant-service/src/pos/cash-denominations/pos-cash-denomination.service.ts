@@ -6,10 +6,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { MerchantRepository } from '../../modules/merchant/merchant.repository';
-import { FileStorageService } from '../../modules/file-storage/file-storage.service';
 import { PosCashDenominationEntity } from './pos-cash-denomination.entity';
 import { PosCashDenominationItemEntity } from './pos-cash-denomination-item.entity';
 import { PosCashDenominationItemDto, SavePosCashDenominationDto } from './pos-cash-denomination.dto';
+
+const imagePattern = /^data:image\/(png|jpeg|jpg|webp);base64,/i;
 
 export interface PosCashDenominationItem {
   id: string;
@@ -30,10 +31,7 @@ export interface PosCashDenominationRecord {
 
 @Injectable()
 export class PosCashDenominationService {
-  constructor(
-    @Inject(MerchantRepository) private readonly merchants: MerchantRepository,
-    @Inject(FileStorageService) private readonly files: FileStorageService,
-  ) {}
+  constructor(@Inject(MerchantRepository) private readonly merchants: MerchantRepository) {}
 
   async get(storeId: string): Promise<{ success: true; cashDenominations: PosCashDenominationRecord }> {
     const store = await this.requireStore(storeId);
@@ -44,21 +42,19 @@ export class PosCashDenominationService {
 
   async create(storeId: string, body: SavePosCashDenominationDto) {
     const store = await this.requireStore(storeId);
-    const scope = await this.imageScope(store);
-    this.assertImages(body, scope);
+    this.assertImages(body);
     if (await this.findByStore(store.id)) {
       throw new ConflictException('Cash denominations already exist for this store');
     }
-    return { success: true, cashDenominations: await this.write(store, scope, body, null) };
+    return { success: true, cashDenominations: await this.write(store.id, store.merchantId, body, null) };
   }
 
   async update(storeId: string, body: SavePosCashDenominationDto) {
     const store = await this.requireStore(storeId);
-    const scope = await this.imageScope(store);
-    this.assertImages(body, scope);
+    this.assertImages(body);
     const current = await this.findByStore(store.id);
     if (!current) throw new NotFoundException('Cash denominations are not configured for this store');
-    return { success: true, cashDenominations: await this.write(store, scope, body, current.id) };
+    return { success: true, cashDenominations: await this.write(store.id, store.merchantId, body, current.id) };
   }
 
   private async requireStore(storeId: string) {
@@ -67,16 +63,10 @@ export class PosCashDenominationService {
     return store;
   }
 
-  private assertImages(
-    body: SavePosCashDenominationDto,
-    scope: { merchantName: string; storeName: string },
-  ) {
+  private assertImages(body: SavePosCashDenominationDto) {
     const items = [...(body.cashDenominations || []), ...(body.coinDenominations || [])];
-    const accepted = (value: string) =>
-      this.files.isDataImage(value) ||
-      this.files.isWithinDirectory(value, scope);
-    if (items.some(item => !accepted(item.imageData || ''))) {
-      throw new BadRequestException('Each denomination image must be a PNG, JPG, or WEBP data URL or an upload URL for this store');
+    if (items.some(item => !imagePattern.test(item.imageData || ''))) {
+      throw new BadRequestException('Each denomination image must be a PNG, JPG, or WEBP data URL');
     }
   }
 
@@ -89,76 +79,26 @@ export class PosCashDenominationService {
   }
 
   private async write(
-    store: { id: string; merchantId: string; storeName: string },
-    scope: { merchantName: string; storeName: string },
+    storeId: string,
+    merchantId: string,
     body: SavePosCashDenominationDto,
     existingId: string | null,
   ): Promise<PosCashDenominationRecord> {
-    const previous = existingId ? await this.findItems(existingId) : [];
-    const written: string[] = [];
-    const cash = await this.persistImages(scope, body.cashDenominations || [], written);
-    const coins = await this.persistImages(scope, body.coinDenominations || [], written);
-    try {
-      const db = this.merchants.requireDataSource();
-      const record = await db.transaction(async manager => {
-        const settings = manager.getRepository(PosCashDenominationEntity);
-        const items = manager.getRepository(PosCashDenominationItemEntity);
-        const row = existingId
-          ? await settings.save({ id: existingId, storeId: store.id, merchantId: store.merchantId })
-          : await settings.save(settings.create({ storeId: store.id, merchantId: store.merchantId }));
+    const db = this.merchants.requireDataSource();
+    return db.transaction(async manager => {
+      const settings = manager.getRepository(PosCashDenominationEntity);
+      const items = manager.getRepository(PosCashDenominationItemEntity);
+      const row = existingId
+        ? await settings.save({ id: existingId, storeId, merchantId })
+        : await settings.save(settings.create({ storeId, merchantId }));
 
-        await items.delete({ denominationId: row.id });
-        const rows = [
-          ...this.itemRows(row.id, 'cash', cash),
-          ...this.itemRows(row.id, 'coin', coins),
-        ];
-        const saved = rows.length ? await items.save(rows.map(item => items.create(item))) : [];
-        return this.present(row, saved);
-      });
-      const kept = new Set([...cash, ...coins].map(item => item.imageData));
-      for (const item of previous) {
-        if (!kept.has(item.imageData)) await this.files.removeStoredFile(item.imageData, scope);
-      }
-      return record;
-    } catch (error) {
-      for (const url of written) await this.files.removeStoredFile(url, scope);
-      throw error;
-    }
-  }
-
-  private async persistImages(
-    scope: { merchantName: string; storeName: string },
-    list: PosCashDenominationItemDto[],
-    written: string[],
-  ) {
-    const saved: PosCashDenominationItemDto[] = [];
-    for (const item of list) {
-      const created = this.files.isDataImage(item.imageData);
-      const imageData = await this.files.storeImageData({
-        merchantName: scope.merchantName,
-        storeName: scope.storeName,
-        imageName: item.imageName,
-        imageData: item.imageData,
-      });
-      if (created) written.push(imageData);
-      saved.push({ ...item, imageData });
-    }
-    return saved;
-  }
-
-  private async imageScope(store: { merchantId: string; storeName: string }) {
-    const { merchant } = await this.merchants.getMerchantById(store.merchantId);
-    if (!merchant) throw new NotFoundException('Merchant not found');
-    return {
-      merchantName: merchant.businessDisplayName || merchant.merchantCode || merchant.merchantId || 'merchant',
-      storeName: store.storeName || 'store',
-    };
-  }
-
-  private async findItems(denominationId: string) {
-    return this.merchants.requireDataSource().getRepository(PosCashDenominationItemEntity).find({
-      where: { denominationId },
-      order: { sortOrder: 'ASC' },
+      await items.delete({ denominationId: row.id });
+      const rows = [
+        ...this.itemRows(row.id, 'cash', body.cashDenominations || []),
+        ...this.itemRows(row.id, 'coin', body.coinDenominations || []),
+      ];
+      const saved = rows.length ? await items.save(rows.map(item => items.create(item))) : [];
+      return this.present(row, saved);
     });
   }
 
@@ -174,28 +114,11 @@ export class PosCashDenominationService {
   }
 
   private async withItems(record: PosCashDenominationEntity): Promise<PosCashDenominationRecord> {
-    const items = await this.findItems(record.id);
-    await this.materializeImages(record, items);
+    const items = await this.merchants.requireDataSource().getRepository(PosCashDenominationItemEntity).find({
+      where: { denominationId: record.id },
+      order: { sortOrder: 'ASC' },
+    });
     return this.present(record, items);
-  }
-
-  private async materializeImages(
-    record: PosCashDenominationEntity,
-    items: PosCashDenominationItemEntity[],
-  ) {
-    const pending = items.filter(item => this.files.isDataImage(item.imageData));
-    if (!pending.length) return;
-    const store = await this.requireStore(record.storeId);
-    const scope = await this.imageScope(store);
-    for (const item of pending) {
-      item.imageData = await this.files.storeImageData({
-        merchantName: scope.merchantName,
-        storeName: scope.storeName,
-        imageName: item.imageName,
-        imageData: item.imageData,
-      });
-    }
-    await this.merchants.requireDataSource().getRepository(PosCashDenominationItemEntity).save(pending);
   }
 
   private present(record: PosCashDenominationEntity, items: PosCashDenominationItemEntity[]): PosCashDenominationRecord {
