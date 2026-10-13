@@ -1,16 +1,11 @@
 import { EmployeeValidationPipe, EmployeeResponseInterceptor } from './workforce-validation.pipe';
 import { BadRequestException, Body, Controller, Delete, Get, Inject, NotFoundException, Param, Patch, Post, Put, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { unlink, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
 import { RelationshipOwnerGuard, RelationshipRequest, relationshipUserId } from '../shared/relationships.controller';
+import { FileStorageService } from '../file-storage/file-storage.service';
 import { MerchantRepository } from '../merchant/merchant.repository';
 import { CreateEmployeeDto, UpdateEmployeeDto } from './employee.dto';
 
-const employeeImageDirectory = join(process.cwd(), 'uploads', 'employees');
-mkdirSync(employeeImageDirectory, { recursive: true });
 const { memoryStorage } = require('multer');
 const employeeImageUpload = FileInterceptor('image', {
   storage: memoryStorage(),
@@ -21,13 +16,16 @@ const employeeImageUpload = FileInterceptor('image', {
   },
 });
 
-type UploadedEmployeeImage = { buffer: Buffer; mimetype: string };
+type UploadedEmployeeImage = { buffer: Buffer; mimetype: string; originalname?: string };
 
 @UseInterceptors(EmployeeResponseInterceptor)
 @UseGuards(RelationshipOwnerGuard)
 @Controller(['api/v1/merchants/:merchantId/employees', 'connector/api/v1/merchants/:merchantId/employees'])
 export class MerchantEmployeeController {
-  constructor(@Inject(MerchantRepository) private readonly repository: MerchantRepository) {}
+  constructor(
+    @Inject(MerchantRepository) private readonly repository: MerchantRepository,
+    @Inject(FileStorageService) private readonly files: FileStorageService,
+  ) {}
 
   @Get()
   async list(@Param('merchantId') merchantId: string, @Query('status') status?: string) {
@@ -54,7 +52,7 @@ export class MerchantEmployeeController {
       const merchantUuid = await this.requireMerchantId(merchantId);
       body.merchantId = merchantUuid;
       body.createdBy = relationshipUserId(request);
-      if (file) { imageUrl = await this.saveImage(file); body.profileImageUrl = imageUrl; }
+      if (file) { imageUrl = await this.saveImage(merchantUuid, file); body.profileImageUrl = imageUrl; }
       const created = await this.repository.createEmployee(body as CreateEmployeeDto);
       saved = true;
       const employee = await this.repository.getEmployeeDetails(merchantUuid, created.id);
@@ -75,7 +73,7 @@ export class MerchantEmployeeController {
       body.updatedBy = relationshipUserId(request);
       const current = await this.repository.getEmployeeDetails(merchantUuid, idOrCode);
       if (!current) throw new NotFoundException(`Employee '${idOrCode}' not found`);
-      if (file) { imageUrl = await this.saveImage(file); body.profileImageUrl = imageUrl; }
+      if (file) { imageUrl = await this.saveImage(merchantUuid, file); body.profileImageUrl = imageUrl; }
       const updated = await this.repository.updateEmployee(merchantUuid, idOrCode, body as UpdateEmployeeDto);
       if (!updated) throw new NotFoundException(`Employee '${idOrCode}' not found`);
       saved = true;
@@ -94,11 +92,14 @@ export class MerchantEmployeeController {
     return this.update(merchantId, idOrCode, body, request, file);
   }
 
-  private async saveImage(file: UploadedEmployeeImage): Promise<string> {
-    const extension = file.mimetype === 'image/png' ? '.png' : file.mimetype === 'image/webp' ? '.webp' : '.jpg';
-    const filename = `${randomUUID()}${extension}`;
-    await writeFile(join(employeeImageDirectory, filename), file.buffer);
-    return `/uploads/employees/${filename}`;
+  private async saveImage(merchantId: string, file: UploadedEmployeeImage): Promise<string> {
+    const saved = await this.files.saveMerchantFile({
+      merchantName: await this.merchantFolderName(merchantId),
+      filename: file.originalname || 'profile',
+      buffer: file.buffer,
+      mimeType: file.mimetype,
+    });
+    return saved.url;
   }
 
   @Delete(':idOrCode')
@@ -115,8 +116,14 @@ export class MerchantEmployeeController {
     return id;
   }
 
+  private async merchantFolderName(merchantId: string): Promise<string> {
+    const { merchant } = await this.repository.getMerchantById(merchantId);
+    if (!merchant) throw new NotFoundException(`Merchant '${merchantId}' not found`);
+    return merchant.businessDisplayName || merchant.merchantCode || merchant.merchantId || 'merchant';
+  }
+
   private async removeLocalImage(value: unknown): Promise<void> {
-    if (typeof value !== 'string' || !value.startsWith('/uploads/employees/')) return;
-    await unlink(join(employeeImageDirectory, basename(value))).catch(() => undefined);
+    if (typeof value !== 'string') return;
+    await this.files.removeUpload(value);
   }
 }

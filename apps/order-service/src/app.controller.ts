@@ -4,6 +4,7 @@ import { OrderStatus, OrderType, PaymentMethod, PaymentStatus } from './entities
 import type { StoreOrderCalculationInput } from './calculations/store-order.calculations';
 import { OrderUpdatePresenter } from './modules/order-updates/order-update.presenter';
 import { OrderListPresenter } from './responses/order-list.presenter';
+import { clientOrderIdValue } from './responses/client-order-id';
 import { OrderResponsePresenter } from './responses/order-response.presenter';
 
 @Controller(['api/v1/orders', 'connector/api/v1/orders'])
@@ -111,7 +112,10 @@ export class AppController {
   ) {
     const data = await this.orderRepository.getOrderDetails(id, storeHeader || storeId || storeIdSnake);
     if (!data) throw new NotFoundException(`Order '${id}' not found`);
-    return this.orderDetails.present(data);
+    const body = this.orderDetails.present(data);
+    const clientOrderId = clientOrderIdValue(data.order, data.storeOrder);
+    if (!clientOrderId || !body || typeof body !== 'object' || !('id' in body)) return body;
+    return { ...body, id: clientOrderId };
   }
 
   // --- 4. Update Order Status (State Machine Transition) ---
