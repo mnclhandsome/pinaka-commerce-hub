@@ -197,12 +197,7 @@ export class PosSafeTransactionsService implements OnModuleInit {
     return {
       message: 'Safe created successfully',
       post_id: id.id,
-      safe_data: {
-        shift_id: body.shift_id,
-        safe_denom: safeData,
-        coins_total: Number(body.coins_total ?? 0),
-        total_amount: Number(body.total_amount ?? 0),
-      },
+      data: safeData,
     };
   }
 
