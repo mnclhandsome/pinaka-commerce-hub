@@ -974,6 +974,7 @@ export class OrderRepository implements OnModuleInit {
           ?? line.category_name
           ?? line.categoryName
           ?? line.category?.name
+          ?? line.tax_class
           ?? 'custom-product';
         const categoryKey = String(categoryReference).trim().toLowerCase();
         const rate = rates.get(`${order.storeId}:${categoryKey}`)
