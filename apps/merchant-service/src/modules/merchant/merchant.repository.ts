@@ -6,12 +6,15 @@ import * as crypto from 'crypto';
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
   InternalServerErrorException,
   NotFoundException,
   OnModuleInit,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
+import { FileStorageService } from '../file-storage/file-storage.service';
 import { FeatureEntity, FeatureStatus } from '../../entities/feature.entity';
 import {
   PermissionEntity,
@@ -161,6 +164,12 @@ const mappingRequired = `COALESCE((to_jsonb(mapping)->>'required')::boolean, fal
 
 @Injectable()
 export class MerchantRepository implements OnModuleInit {
+  constructor(
+    @Optional()
+    @Inject(FileStorageService)
+    private readonly fileStorage?: FileStorageService,
+  ) {}
+
   async getSubscribedFeatures(merchantId: string, storeTypeId: string) {
     if (!this.isDbConnected || !this.dataSource?.isInitialized)
       throw new ServiceUnavailableException(
@@ -1081,7 +1090,12 @@ export class MerchantRepository implements OnModuleInit {
             subscriptionId: subscription?.id,
           },
         });
-        return { merchant, stores: savedStores, subscription };
+        return {
+          merchant,
+          stores: savedStores,
+          subscription,
+          previousMerchantName: existing?.businessDisplayName ?? null,
+        };
       });
     } catch (error: any) {
       if ((error.driverError?.code || error.code) === '23505')
@@ -1092,7 +1106,72 @@ export class MerchantRepository implements OnModuleInit {
     }
     for (const store of result.stores)
       await this.cacheStorePin(store.activationPin, store);
-    return result;
+    await this.syncStorageFolders(
+      result.merchant,
+      result.stores,
+      result.previousMerchantName,
+    );
+    return {
+      merchant: result.merchant,
+      stores: result.stores,
+      subscription: result.subscription,
+    };
+  }
+
+  private merchantLabel(merchant: {
+    businessDisplayName?: string | null;
+    merchantCode?: string | null;
+    merchantId?: string | null;
+  }): string {
+    return (
+      merchant.businessDisplayName?.trim() ||
+      merchant.merchantCode?.trim() ||
+      merchant.merchantId?.trim() ||
+      'merchant'
+    );
+  }
+
+  private async syncStorageFolders(
+    merchant: {
+      businessDisplayName?: string | null;
+      merchantCode?: string | null;
+      merchantId?: string | null;
+    },
+    stores: Array<{ storeName?: string | null }>,
+    previousMerchantName?: string | null,
+  ): Promise<void> {
+    if (!this.fileStorage) return;
+    const nextName = this.merchantLabel(merchant);
+    const previous = previousMerchantName?.trim();
+    if (previous && previous !== (merchant.businessDisplayName || '').trim()) {
+      await this.fileStorage.renameMerchantFolder(previous, nextName);
+    } else {
+      await this.fileStorage.ensureMerchantFolder(nextName);
+    }
+    for (const store of stores) {
+      if (store.storeName?.trim()) {
+        await this.fileStorage.ensureStoreFolder(nextName, store.storeName);
+      }
+    }
+  }
+
+  private async provisionStoreFolder(
+    merchantUuid: string,
+    storeName: string,
+    previousStoreName?: string | null,
+  ): Promise<void> {
+    if (!this.fileStorage || !this.merchantRepo || !storeName?.trim()) return;
+    const merchant = await this.merchantRepo.findOne({
+      where: { id: merchantUuid },
+    });
+    if (!merchant) return;
+    const merchantName = this.merchantLabel(merchant);
+    const previous = previousStoreName?.trim();
+    if (previous && previous !== storeName.trim()) {
+      await this.fileStorage.renameStoreFolder(merchantName, previous, storeName);
+      return;
+    }
+    await this.fileStorage.ensureStoreFolder(merchantName, storeName);
   }
 
   async createMerchant(
@@ -1147,6 +1226,7 @@ export class MerchantRepository implements OnModuleInit {
       saved.email,
       { businessName: saved.businessName },
     );
+    await this.syncStorageFolders(saved, []);
     return saved;
   }
 
@@ -1163,6 +1243,7 @@ export class MerchantRepository implements OnModuleInit {
       order: { createdAt: 'DESC' },
     });
     if (!merchant) return null;
+    const previousName = merchant.businessDisplayName;
     Object.assign(merchant, data, {
       id: merchant.id,
       merchantId: merchant.merchantId,
@@ -1172,6 +1253,7 @@ export class MerchantRepository implements OnModuleInit {
     await this.recordAuditLog('MERCHANT_UPDATED', id, undefined, saved.email, {
       businessName: saved.businessName,
     });
+    await this.syncStorageFolders(saved, [], previousName);
     return saved;
   }
 
@@ -1374,6 +1456,7 @@ export class MerchantRepository implements OnModuleInit {
       'merchant',
       { storeName: entity.storeName, pin: activationPin },
     );
+    await this.provisionStoreFolder(identity.merchantUuid, entity.storeName);
     return entity;
   }
 
@@ -1427,6 +1510,7 @@ export class MerchantRepository implements OnModuleInit {
         'merchant',
         { storeName: store.storeName },
       );
+      await this.provisionStoreFolder(identity.merchantUuid, store.storeName);
     }
     return stores;
   }
@@ -1445,6 +1529,7 @@ export class MerchantRepository implements OnModuleInit {
       if (existing) {
         if (!(await this.storeMatchesMerchant(existing, identity.merchantId)))
           throw new Error(`Store ID '${data.id}' belongs to another merchant`);
+        const previousStoreName = existing.storeName;
         Object.assign(existing, data, {
           merchantId: identity.merchantUuid,
           updatedAt: new Date(),
@@ -1456,6 +1541,11 @@ export class MerchantRepository implements OnModuleInit {
           saved.id,
           'merchant',
           { storeName: saved.storeName },
+        );
+        await this.provisionStoreFolder(
+          identity.merchantUuid,
+          saved.storeName,
+          previousStoreName,
         );
         return saved;
       }
@@ -1657,6 +1747,7 @@ export class MerchantRepository implements OnModuleInit {
   ): Promise<StoreEntity | null> {
     const store = await this.getStoreById(id);
     if (!store) return null;
+    const previousStoreName = store.storeName;
     const { id: _ignoredId, merchantId: _ignoredMerchantId, ...safeFields } =
       fields;
     const updated = {
@@ -1682,6 +1773,11 @@ export class MerchantRepository implements OnModuleInit {
       store.id,
       'merchant',
       { storeName: updated.storeName },
+    );
+    await this.provisionStoreFolder(
+      store.merchantId,
+      updated.storeName,
+      previousStoreName,
     );
     return updated;
   }
