@@ -184,15 +184,36 @@ export class FastkeyController {
   }
 
   private requestOrigin(request: AuthenticatedRequest): string {
-    const forwardedProto = request.headers?.['x-forwarded-proto'];
-    const protocol = Array.isArray(forwardedProto)
-      ? forwardedProto[0]
-      : forwardedProto?.split(',')[0]?.trim() || request.protocol || 'http';
-    const forwardedHost = request.headers?.['x-forwarded-host'];
-    const host =
-      (Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost) ||
-      request.get('host') ||
-      'localhost:3003';
-    return `${protocol}://${host}`;
+    return requestOrigin(request);
   }
+}
+
+@Controller(['api/v1/store', 'connector/api/v1/store'])
+export class StoreFastkeyImageController {
+  constructor(
+    @Inject(FastkeyService)
+    private readonly service: FastkeyService,
+  ) {}
+
+  @Get('get-all-fastkeys-images')
+  @RequireAuth()
+  getAllFastkeyImages(@Req() request: AuthenticatedRequest) {
+    return this.service.getStoreFastkeyImages(
+      request.user?.id,
+      requestOrigin(request),
+    );
+  }
+}
+
+function requestOrigin(request: AuthenticatedRequest): string {
+  const forwardedProto = request.headers?.['x-forwarded-proto'];
+  const protocol = Array.isArray(forwardedProto)
+    ? forwardedProto[0]
+    : forwardedProto?.split(',')[0]?.trim() || request.protocol || 'http';
+  const forwardedHost = request.headers?.['x-forwarded-host'];
+  const host =
+    (Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost) ||
+    request.get('host') ||
+    'localhost:3003';
+  return `${protocol}://${host}`;
 }
