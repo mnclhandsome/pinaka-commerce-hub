@@ -36,6 +36,9 @@ export class SessionAuthGuard implements CanActivate {
             accountId: payload.accountId,
             email: payload.email,
             role: payload.role,
+            merchantId: payload.merchantId,
+            storeId: payload.storeId,
+            deviceId: payload.deviceId,
             sessionId: payload.jti,
           };
         } catch {
@@ -62,6 +65,9 @@ export class SessionAuthGuard implements CanActivate {
       accountId: payload.accountId ?? session.accountId,
       email: payload.email ?? session.email,
       role: payload.role ?? session.role,
+      merchantId: payload.merchantId,
+      storeId: payload.storeId,
+      deviceId: payload.deviceId,
       sessionId: session.id,
       merchantId: scopedPayload.merchantId ?? session.merchantId,
       storeId: scopedPayload.storeId ?? session.storeId,
