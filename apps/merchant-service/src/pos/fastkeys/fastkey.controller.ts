@@ -80,19 +80,8 @@ export class FastkeyController {
       request.user?.id,
       this.requestOrigin(request),
       file,
+      request.user?.storeId,
     );
-    const origin = this.requestOrigin(request);
-    let imagePath: string | undefined;
-    try {
-      if (file) {
-        imagePath = await this.saveImage(file);
-        dto.fastkey_image = `${origin}${imagePath}`;
-      }
-      return await this.service.create(dto, request.user?.id, origin, request.user?.storeId);
-    } catch (error) {
-      if (imagePath) await this.removeImage(imagePath);
-      throw error;
-    }
   }
 
   @Post(['update-fastkey', 'update', 'update-fastkeys'])
@@ -109,6 +98,7 @@ export class FastkeyController {
       request.user?.id,
       this.requestOrigin(request),
       file,
+      request.user?.storeId,
     );
     return result.response;
   }

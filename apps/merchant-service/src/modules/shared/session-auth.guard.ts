@@ -65,8 +65,6 @@ export class SessionAuthGuard implements CanActivate {
       accountId: payload.accountId ?? session.accountId,
       email: payload.email ?? session.email,
       role: payload.role ?? session.role,
-      merchantId: payload.merchantId,
-      storeId: payload.storeId,
       deviceId: payload.deviceId,
       sessionId: session.id,
       merchantId: scopedPayload.merchantId ?? session.merchantId,
