@@ -159,6 +159,15 @@ interface WordPressCategoryNode {
   children?: WordPressCategoryNode[];
 }
 
+interface StoreProductTaxConfiguration {
+  currency: string;
+  decimalPlaces: number;
+  taxEnabled: boolean;
+  defaultTaxRate: number | null;
+  taxCalculation: string;
+  taxClasses: Array<{ name: string; rate: number }>;
+}
+
 /** `required` is optional on older mapping rows. */
 const mappingRequired = `COALESCE((to_jsonb(mapping)->>'required')::boolean, false)`;
 
@@ -3420,7 +3429,7 @@ export class MerchantRepository implements OnModuleInit {
     if (!/^\d+$/.test(categoryKey)) {
       throw new BadRequestException('categoryId must be a number');
     }
-    const [productRows, categoryRows] = await Promise.all([
+    const [productRows, categoryRows, taxConfiguration] = await Promise.all([
       this.dataSource.query(
         `SELECT COALESCE(jsonb_agg(product), '[]'::jsonb) AS products
          FROM public.store_products AS catalog
@@ -3470,24 +3479,27 @@ export class MerchantRepository implements OnModuleInit {
         if (code === '42P01' || code === '42703') return [];
         throw error;
       }),
+      this.getStoreProductTaxConfiguration(storeId),
     ]);
     const products = productRows[0]?.products;
     if (!Array.isArray(products) || products.length === 0) return null;
     const category = this.asRecord(categoryRows[0]?.category);
     return products.map((product) =>
-      this.presentWooProduct(this.asRecord(product) ?? {}, category),
+      this.presentWooProduct(this.asRecord(product) ?? {}, category, taxConfiguration),
     );
   }
 
   private presentWooProduct(
     product: Record<string, unknown>,
     category: Record<string, unknown> | null,
+    taxConfiguration: StoreProductTaxConfiguration | null = null,
   ): Record<string, unknown> {
     const value = (key: string): unknown =>
       Object.prototype.hasOwnProperty.call(product, key) && product[key] !== undefined
         ? product[key]
         : null;
     const dimensions = this.asRecord(product.dimensions);
+    const tax = this.productTax(product, category, taxConfiguration);
     return {
       id: this.numberOrNull(product.id),
       name: value('name'),
@@ -3523,6 +3535,13 @@ export class MerchantRepository implements OnModuleInit {
       button_text: value('button_text'),
       tax_status: value('tax_status'),
       tax_class: value('tax_class'),
+      tax_applicable: tax.applicable,
+      tax_rate: tax.rate,
+      tax_amount: tax.amount,
+      price_including_tax: tax.priceIncludingTax,
+      tax_class_details: tax.taxClass,
+      tax_calculation: taxConfiguration?.taxCalculation ?? null,
+      currency: taxConfiguration?.currency ?? null,
       manage_stock: value('manage_stock'),
       stock_quantity: value('stock_quantity'),
       backorders: value('backorders'),
@@ -3567,6 +3586,103 @@ export class MerchantRepository implements OnModuleInit {
       global_unique_id: value('global_unique_id'),
       _links: value('_links'),
     };
+  }
+
+  private async getStoreProductTaxConfiguration(
+    storeId: string,
+  ): Promise<StoreProductTaxConfiguration | null> {
+    const settings = await this.dataSource.getRepository(PosCurrencyTaxEntity).findOne({ where: { storeId } });
+    if (settings) {
+      const classes = await this.dataSource.getRepository(PosTaxClassEntity).find({
+        where: { currencyTaxId: settings.id },
+        order: { sortOrder: 'ASC' },
+      });
+      return {
+        currency: settings.currency,
+        decimalPlaces: Number(settings.decimalPlaces),
+        taxEnabled: settings.taxEnabled,
+        defaultTaxRate: settings.defaultTaxRate === null ? null : Number(settings.defaultTaxRate),
+        taxCalculation: settings.taxCalculation,
+        taxClasses: classes.map((taxClass) => ({ name: taxClass.name, rate: Number(taxClass.rate) })),
+      };
+    }
+
+    const legacy = await this.dataSource.getRepository(StorePosConfigurationEntity).findOne({
+      where: { storeId, configurationName: 'currency_taxes' },
+    });
+    if (!legacy) return null;
+    const value = legacy.configurationValue;
+    const taxClasses = Array.isArray(value.taxClasses)
+      ? value.taxClasses.flatMap((item) => {
+          const taxClass = this.asRecord(item);
+          const name = this.textOrNull(taxClass?.name);
+          const rate = this.numberOrNull(taxClass?.rate);
+          return name && rate !== null ? [{ name, rate }] : [];
+        })
+      : [];
+    return {
+      currency: this.textOrNull(value.currency) ?? 'USD',
+      decimalPlaces: this.numberOrNull(value.decimalPlaces) ?? 2,
+      taxEnabled: value.taxEnabled !== false,
+      defaultTaxRate: this.numberOrNull(value.defaultTaxRate),
+      taxCalculation: this.textOrNull(value.taxCalculation) ?? 'item-price',
+      taxClasses,
+    };
+  }
+
+  private productTax(
+    product: Record<string, unknown>,
+    category: Record<string, unknown> | null,
+    configuration: StoreProductTaxConfiguration | null,
+  ): {
+    applicable: boolean;
+    rate: number;
+    amount: string | null;
+    priceIncludingTax: string | null;
+    taxClass: { name: string; rate: number } | null;
+  } {
+    const price = this.numberOrNull(product.price);
+    if (!configuration || !configuration.taxEnabled) {
+      return {
+        applicable: false,
+        rate: 0,
+        amount: price === null ? null : this.formatMoney(0, configuration?.decimalPlaces),
+        priceIncludingTax: price === null ? null : this.formatMoney(price, configuration?.decimalPlaces),
+        taxClass: null,
+      };
+    }
+    const productClass = this.taxClassKey(product.tax_class ?? category?.pos_tax_class ?? category?.posTaxClass);
+    const configuredClass = configuration.taxClasses.find(
+      (taxClass) => this.taxClassKey(taxClass.name) === productClass,
+    );
+    const categoryRate = this.numberOrNull(category?.pos_tax_percent ?? category?.posTaxPercent);
+    const rate = configuredClass?.rate ?? categoryRate ?? configuration.defaultTaxRate ?? 0;
+    const taxClass = {
+      name: configuredClass?.name ?? (productClass === 'standard' ? 'Standard' : productClass),
+      rate,
+    };
+    const amount = price === null ? null : price * rate / 100;
+    return {
+      applicable: true,
+      rate,
+      amount: amount === null ? null : this.formatMoney(amount, configuration.decimalPlaces),
+      priceIncludingTax: price === null || amount === null
+        ? null
+        : this.formatMoney(price + amount, configuration.decimalPlaces),
+      taxClass,
+    };
+  }
+
+  private taxClassKey(value: unknown): string {
+    const normalized = String(value ?? '').trim().toLowerCase();
+    if (!normalized || normalized === 'standard-rate') return 'standard';
+    return normalized.replace(/[_\s]+/g, '-').replace(/-rated?$/, '');
+  }
+
+  private formatMoney(value: number, decimalPlaces = 2): string {
+    const places = Number.isInteger(decimalPlaces) ? Math.min(6, Math.max(0, decimalPlaces)) : 2;
+    const factor = 10 ** places;
+    return (Math.round((value + Number.EPSILON) * factor) / factor).toFixed(places);
   }
 
   private productImages(product: Record<string, unknown>): unknown {
