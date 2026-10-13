@@ -10,17 +10,31 @@ export class StoreHoursDto {
 }
 
 export class StoreEmployeeAssignmentDto {
+  @IsOptional()
   @IsString()
   @MaxLength(100)
-  employee_id!: string;
+  employee_id?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  employeeId?: string;
 
   @IsOptional()
   @IsUUID()
   role_template_id?: string;
 
   @IsOptional()
+  @IsUUID()
+  roleTemplateId?: string;
+
+  @IsOptional()
   @Matches(/^\d{6}$/, { message: 'login_pin must be a 6-digit string' })
   login_pin?: string;
+
+  @IsOptional()
+  @Matches(/^\d{6}$/, { message: 'loginPin must be a 6-digit string' })
+  loginPin?: string;
 }
 
 // Setup selections are stored separately from effective permissions/entitlements.
