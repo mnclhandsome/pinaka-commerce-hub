@@ -358,6 +358,18 @@ export class PosRepository implements OnModuleInit {
       .sort((left, right) => right.openedAt.getTime() - left.openedAt.getTime());
   }
 
+  async getShiftsByEmployee(employeeId: string, storeId?: string): Promise<PosShiftEntity[]> {
+    if (this.isDbConnected && this.shiftRepo) {
+      return await this.shiftRepo.find({
+        where: { openedByEmployeeId: employeeId, ...(storeId ? { storeId } : {}) },
+        order: { openedAt: 'DESC', createdAt: 'DESC' },
+      });
+    }
+    return this.inMemoryShifts
+      .filter((shift) => shift.openedByEmployeeId === employeeId && (!storeId || shift.storeId === storeId))
+      .sort((left, right) => right.openedAt.getTime() - left.openedAt.getTime());
+  }
+
   async getShiftWithSafeTransactions(shiftId: string, storeId: string) {
     const shift = await this.shiftRepo?.findOne({ where: { id: shiftId, storeId } });
     if (!shift) return null;

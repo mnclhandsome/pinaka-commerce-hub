@@ -249,6 +249,20 @@ export class AppController {
     };
   }
 
+  @Get('shifts/employee/:employeeId')
+  async getShiftsByEmployee(
+    @Param('employeeId') employeeId: string,
+    @Query() query: { storeId?: string; store_id?: string },
+  ) {
+    const id = employeeId.trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+      throw new BadRequestException('employeeId must be a valid UUID');
+    }
+    const { storeId } = normalizeShiftRequest(query);
+    const shifts = await this.posRepository.getShiftsByEmployee(id, storeId?.trim() || undefined);
+    return { success: true, employeeId: id, count: shifts.length, shifts };
+  }
+
   @Get('stores/:store_id/shifts/:shift_id')
   async getShift(
     @Param('store_id') store_id: string,
