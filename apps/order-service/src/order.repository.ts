@@ -7,6 +7,7 @@ import { OrderEntity, OrderType, PaymentMethod, PaymentStatus, OrderStatus } fro
 import { OrderItemEntity } from './entities/order-item.entity';
 import { OrderStatusHistoryEntity } from './entities/order-status-history.entity';
 import { StoreOrderEntity } from './entities/store-order.entity';
+import { ensureStorePosPaymentsSchema } from './schemas/store-pos-payments.schema';
 import {
   calculateStoreOrder,
   type StoreOrderCalculationInput,
@@ -41,6 +42,7 @@ export class OrderRepository implements OnModuleInit {
       await this.ensureOrderUuidSchema();
       await this.ensurePosOrderColumns();
       await this.ensureStoreOrdersTable();
+      await ensureStorePosPaymentsSchema(this.dataSource);
       this.orderRepo = this.dataSource.getRepository(OrderEntity);
       this.itemRepo = this.dataSource.getRepository(OrderItemEntity);
       this.historyRepo = this.dataSource.getRepository(OrderStatusHistoryEntity);
