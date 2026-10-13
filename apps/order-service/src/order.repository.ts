@@ -168,6 +168,7 @@ export class OrderRepository implements OnModuleInit {
           const itemRepository = manager.getRepository(OrderItemEntity);
           const historyRepository = manager.getRepository(OrderStatusHistoryEntity);
           const storeOrderRepository = manager.getRepository(StoreOrderEntity);
+          const paymentRows = this.buildStorePosPaymentRows(id, order, orderData, sourcePayload, storeOrder);
           const persistedOrder = await orderRepository.save(orderRepository.create(order));
           await itemRepository.save(items.map(item => itemRepository.create(item)));
           await historyRepository.save(historyRepository.create({
@@ -180,6 +181,23 @@ export class OrderRepository implements OnModuleInit {
             createdAt: new Date(),
           }));
           const persistedStoreOrder = await storeOrderRepository.save(storeOrderRepository.create(storeOrder));
+          if (paymentRows.length) {
+            await manager.query(
+              `INSERT INTO public.store_pos_payments (
+                 order_id, merchant_id, store_id, local_id, client_order_id, device_id,
+                 shift_id, user_id, payment_type, payment_method, payment_method_title,
+                 amount, order_total, remaining, currency, status, entry_type, provider,
+                 provider_transaction_id, provider_response, payment_at, metadata, raw_payload
+               ) VALUES ${paymentRows.map((_, index) => {
+                 const offset = index * 23;
+                 return `(${Array.from({ length: 23 }, (_value, column) => `$${offset + column + 1}`).join(', ')})`;
+               }).join(', ')}
+               ON CONFLICT (store_id, order_id, device_id, local_id)
+                 WHERE local_id IS NOT NULL AND deleted_at IS NULL
+               DO NOTHING`,
+              paymentRows.flat(),
+            );
+          }
           return { persistedOrder, persistedStoreOrder };
         });
         savedOrder = saved.persistedOrder;
@@ -221,6 +239,7 @@ export class OrderRepository implements OnModuleInit {
     const metadata = Array.isArray(sourcePayload?.meta_data)
       ? sourcePayload.meta_data
       : (Array.isArray(orderData.metadata) ? orderData.metadata : []);
+    const posPayments = metadata.find((entry: any) => entry?.key === '_pos_payments')?.value;
     const metaText = (key: string) => {
       const value = metadata.find((entry: any) => entry?.key === key)?.value;
       if (value === undefined || value === null || value === '') return undefined;
@@ -264,11 +283,95 @@ export class OrderRepository implements OnModuleInit {
       feeLines: Array.isArray(sourcePayload?.fee_lines) ? sourcePayload.fee_lines : [],
       couponLines: Array.isArray(sourcePayload?.coupon_lines) ? sourcePayload.coupon_lines : [],
       taxLines: Array.isArray(sourcePayload?.tax_lines) ? sourcePayload.tax_lines : [],
-      payments: [],
+      payments: Array.isArray(sourcePayload?.payments)
+        ? sourcePayload.payments
+        : Array.isArray(orderData.payments) ? orderData.payments
+          : Array.isArray(posPayments) ? posPayments : [],
       metaData: metadata,
       createdAt: new Date(),
       updatedAt: new Date(),
     };
+  }
+
+  private buildStorePosPaymentRows(
+    orderId: string,
+    order: OrderEntity,
+    orderData: any,
+    sourcePayload: any,
+    storeOrder: StoreOrderEntity,
+  ): any[][] {
+    const submittedPayments = Array.isArray(sourcePayload?.payments)
+      ? sourcePayload.payments
+      : Array.isArray(orderData?.payments) ? orderData.payments
+        : (() => {
+            const metadata = Array.isArray(sourcePayload?.meta_data)
+              ? sourcePayload.meta_data
+              : Array.isArray(orderData?.metadata) ? orderData.metadata : [];
+            const value = metadata.find((entry: any) => entry?.key === '_pos_payments')?.value;
+            return Array.isArray(value) ? value : [];
+          })();
+    const payments = submittedPayments.length
+      ? submittedPayments
+      : [{
+          method: sourcePayload?.payment_method || orderData?.paymentMethod || order.paymentMethod,
+          method_title: sourcePayload?.payment_method_title || orderData?.paymentMethodTitle,
+          amount: sourcePayload?.amount_paid ?? sourcePayload?.total ?? orderData?.totalAmount ?? order.totalAmount,
+          status: sourcePayload?.set_paid === false ? 'pending' : 'completed',
+          transaction_id: sourcePayload?.transaction_id ?? sourcePayload?.transactionId,
+          provider: sourcePayload?.provider,
+        }];
+
+    const orderTotal = Number(order.totalAmount || 0);
+    const normalizedAmounts = payments.map((payment: any) => Number(
+      payment?.amount ?? payment?.total ?? payment?.value ?? 0,
+    ));
+    return payments.map((payment: any, index: number) => {
+      const amount = normalizedAmounts[index];
+      const method = String(payment?.payment_method ?? payment?.paymentMethod ?? payment?.method ??
+        sourcePayload?.payment_method ?? order.paymentMethod ?? 'cash');
+      const paymentAtValue = payment?.payment_at ?? payment?.paymentAt ?? payment?.created_at ?? payment?.createdAt;
+      const paymentAt = paymentAtValue && !Number.isNaN(Date.parse(String(paymentAtValue)))
+        ? new Date(String(paymentAtValue))
+        : new Date();
+      const localId = payment?.local_id ?? payment?.localId ?? payment?.id ?? null;
+      const calculatedRemaining = Math.max(0, orderTotal - normalizedAmounts
+        .slice(0, index + 1)
+        .reduce((sum: number, value: number) => sum + (Number.isFinite(value) ? value : 0), 0));
+      const remaining = Number(payment?.remaining ?? calculatedRemaining);
+      const rawPayload = payment && typeof payment === 'object' ? payment : { value: payment };
+      const metadata = payment?.metadata && typeof payment.metadata === 'object'
+        ? payment.metadata
+        : {};
+
+      return [
+        orderId,
+        order.merchantId,
+        order.storeId,
+        localId == null ? null : String(localId),
+        payment?.client_order_id ?? payment?.clientOrderId ?? storeOrder.clientOrderId ?? null,
+        payment?.device_id ?? payment?.deviceId ?? storeOrder.deviceId ?? null,
+        payment?.shift_id ?? payment?.shiftId ?? storeOrder.shiftId ?? null,
+        payment?.user_id ?? payment?.userId ?? payment?.cashier_id ?? payment?.cashierId ?? storeOrder.placedBy ?? null,
+        payment?.payment_type ?? payment?.paymentType ?? 'pos_payment',
+        method,
+        payment?.payment_method_title ?? payment?.paymentMethodTitle ?? payment?.method_title ?? payment?.methodTitle ??
+          sourcePayload?.payment_method_title ?? orderData?.paymentMethodTitle ?? storeOrder.paymentMethodTitle ?? null,
+        Number.isFinite(amount) ? amount : 0,
+        orderTotal,
+        Number.isFinite(remaining) ? Math.max(0, remaining) : calculatedRemaining,
+        payment?.currency ?? orderData?.currency ?? null,
+        payment?.status ?? (orderData?.paymentStatus === PaymentStatus.PENDING ? 'pending' : 'completed'),
+        payment?.entry_type ?? payment?.entryType ?? 'payment',
+        payment?.provider ?? null,
+        payment?.provider_transaction_id ?? payment?.providerTransactionId ?? payment?.transaction_id ?? payment?.transactionId ?? null,
+        payment?.provider_response == null && payment?.providerResponse == null
+          ? null
+          : JSON.stringify(payment.provider_response ?? payment.providerResponse),
+        paymentAt.toISOString(),
+        JSON.stringify(metadata),
+        JSON.stringify(rawPayload),
+      ];
+    });
   }
 
   /**
@@ -1007,6 +1110,63 @@ export class OrderRepository implements OnModuleInit {
       return this.orderRepo.find({ where: { storeId }, order: { createdAt: 'DESC' } });
     }
     return this.inMemoryOrders.filter(o => o.storeId === storeId);
+  }
+
+  async getStorePosPayments(storeId: string) {
+    if (!this.isDbConnected || !this.dataSource) {
+      throw new ServiceUnavailableException('Order database is unavailable');
+    }
+
+    try {
+      return await this.dataSource.query(
+        `SELECT
+         payment.id,
+         payment.order_id,
+         order_record.order_number,
+         payment.merchant_id,
+         payment.store_id,
+         payment.local_id,
+         payment.client_order_id,
+         payment.device_id,
+         payment.shift_id,
+         COALESCE(
+           payment.user_id,
+           store_sale.placed_by,
+           payment.metadata->>'pos_placed_by',
+           (
+             SELECT item->>'value'
+             FROM jsonb_array_elements(COALESCE(store_sale.meta_data, '[]'::jsonb)) AS item
+             WHERE item->>'key' = 'pos_placed_by'
+             LIMIT 1
+           )
+         ) AS user_id,
+         payment.payment_type,
+         payment.payment_method,
+         COALESCE(payment.payment_method_title, store_sale.payment_method_title) AS payment_method_title,
+         payment.amount,
+         payment.order_total,
+         payment.remaining,
+         payment.currency,
+         payment.status,
+         payment.entry_type,
+         payment.provider,
+         payment.provider_transaction_id,
+         payment.payment_at
+       FROM public.store_pos_payments AS payment
+       LEFT JOIN public.orders AS order_record ON order_record.id = payment.order_id
+       LEFT JOIN public.store_orders AS store_sale ON store_sale.order_id = payment.order_id
+       WHERE payment.store_id = $1::uuid
+         AND payment.deleted_at IS NULL
+       ORDER BY payment.payment_at DESC, payment.created_at DESC`,
+        [storeId],
+      );
+    } catch (error) {
+      console.error('[Order Service] Failed to list store POS payments', {
+        storeId,
+        error,
+      });
+      throw error;
+    }
   }
 
   async getOrderById(orderId: string): Promise<{ order: OrderEntity; items: OrderItemEntity[]; history: OrderStatusHistoryEntity[]; storeOrder: StoreOrderEntity | null } | null> {
