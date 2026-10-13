@@ -1829,6 +1829,53 @@ export class MerchantRepository implements OnModuleInit {
     );
   }
 
+  async getStorePosPaymentsForMerchant(merchantId: string, storeId: string) {
+    const { storeUuid } = await this.requireStoreRecord(merchantId, storeId);
+    const payments = await this.dataSource.query(
+      `SELECT
+         payment.id,
+         payment.order_id,
+         order_record.order_number,
+         payment.merchant_id,
+         payment.store_id,
+         payment.local_id,
+         payment.client_order_id,
+         payment.device_id,
+         payment.shift_id,
+         COALESCE(
+           payment.user_id,
+           store_sale.placed_by,
+           payment.metadata->>'pos_placed_by',
+           (
+             SELECT item->>'value'
+             FROM jsonb_array_elements(COALESCE(store_sale.meta_data, '[]'::jsonb)) AS item
+             WHERE item->>'key' = 'pos_placed_by'
+             LIMIT 1
+           )
+         ) AS user_id,
+         payment.payment_type,
+         payment.payment_method,
+         COALESCE(payment.payment_method_title, store_sale.payment_method_title) AS payment_method_title,
+         payment.amount,
+         payment.order_total,
+         payment.remaining,
+         payment.currency,
+         payment.status,
+         payment.entry_type,
+         payment.provider,
+         payment.provider_transaction_id,
+         payment.payment_at
+       FROM public.store_pos_payments AS payment
+       LEFT JOIN public.orders AS order_record ON order_record.id = payment.order_id
+       LEFT JOIN public.store_orders AS store_sale ON store_sale.order_id = payment.order_id
+       WHERE payment.store_id = $1::uuid
+         AND payment.deleted_at IS NULL
+       ORDER BY payment.payment_at DESC, payment.created_at DESC`,
+      [storeUuid],
+    );
+    return { success: true, storeId: storeUuid, count: payments.length, payments };
+  }
+
   async listStoreEmployees(
     merchantId: string,
     storeId: string,
@@ -3236,6 +3283,25 @@ export class MerchantRepository implements OnModuleInit {
     return rows[0]?.payload ?? null;
   }
 
+  async getStoreCatalogTaxonomiesByStoreId(storeId: string) {
+    await this.ensureStoreCategoriesTable();
+    const rows = await this.dataSource.query(
+      `SELECT payload AS categories, tags, attributes, updated_at
+       FROM public.store_categories
+       WHERE store_id = $1::uuid
+         AND COALESCE(is_deleted, false) = false
+       LIMIT 1`,
+      [storeId],
+    );
+    const row = rows[0];
+    return {
+      categories: Array.isArray(row?.categories) ? row.categories : [],
+      tags: Array.isArray(row?.tags) ? row.tags : [],
+      attributes: Array.isArray(row?.attributes) ? row.attributes : [],
+      updatedAt: row?.updated_at ?? null,
+    };
+  }
+
   async findStoreProductBySku(storeId: string, sku: string): Promise<unknown[]> {
     let code = String(sku ?? '').trim();
     try {
@@ -3874,11 +3940,54 @@ export class MerchantRepository implements OnModuleInit {
 
   async getStoreCatalog(
     storeId: string,
-  ): Promise<{ categories: CategoryEntity[]; products: ProductEntity[] }> {
-    const [categories, products] = await Promise.all([
-      this.categoryRepo.find({ where: { storeId }, order: { name: 'ASC' } }),
-      this.productRepo.find({ where: { storeId }, order: { name: 'ASC' } }),
-    ]);
+  ): Promise<{ categories: CategoryEntity[]; products: unknown[] }> {
+    const categories = await this.categoryRepo.find({
+      where: { storeId },
+      order: { name: 'ASC' },
+    });
+    let catalogRows: Array<{ payload?: unknown }> = [];
+    try {
+      catalogRows = await this.dataSource.query(
+        `SELECT payload
+         FROM public.store_products
+         WHERE store_id = $1::uuid
+           AND COALESCE(is_deleted, false) = false
+         LIMIT 1`,
+        [storeId],
+      );
+    } catch (error) {
+      const postgresCode =
+        error && typeof error === 'object' && 'code' in error
+          ? String((error as { code?: unknown }).code ?? '')
+          : '';
+      if (postgresCode !== '42P01') throw error;
+    }
+    const savedProducts = catalogRows[0]?.payload;
+    if (Array.isArray(savedProducts) && savedProducts.length > 0) {
+      return {
+        categories,
+        products: savedProducts.map((value) => {
+          const product = this.presentWooProduct(this.asRecord(value) ?? {}, null);
+          const productCategories = Array.isArray(product.categories)
+            ? product.categories
+            : [];
+          const firstCategory = this.asRecord(productCategories[0]);
+          const images = Array.isArray(product.images) ? product.images : [];
+          const firstImage = this.asRecord(images[0]);
+          return {
+            ...product,
+            categoryId: firstCategory?.id ?? '',
+            category: firstCategory?.name ?? '',
+            image: firstImage?.src ?? null,
+          };
+        }),
+      };
+    }
+
+    const products = await this.productRepo.find({
+      where: { storeId },
+      order: { name: 'ASC' },
+    });
     return { categories, products };
   }
 
