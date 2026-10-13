@@ -471,6 +471,18 @@ export class AppController {
     return payload;
   }
 
+  @Get('stores/:storeId/catalog/taxonomies')
+  async getStoreCatalogTaxonomies(@Param('storeId') storeId: string) {
+    const store = await this.merchantRepository.getStoreById(storeId);
+    if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    return {
+      success: true,
+      storeId: store.id,
+      merchantId: store.merchantId,
+      ...(await this.merchantRepository.getStoreCatalogTaxonomiesByStoreId(store.id)),
+    };
+  }
+
   @Get('store/:storeId/products/search')
   async searchStoreProducts(
     @Param('storeId') storeId: string,
