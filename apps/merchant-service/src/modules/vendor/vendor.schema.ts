@@ -13,9 +13,7 @@ const legacyColumns: Record<string, { names: string[]; kind: 'text' | 'uuid' | '
   address_line2: { names: ['addressLine2'], kind: 'text' },
   zip_code: { names: ['zipCode'], kind: 'text' },
   created_by: { names: ['createdBy'], kind: 'uuid' },
-  updated_by: { names: ['updatedBy'], kind: 'uuid' },
   created_at: { names: ['createdAt'], kind: 'timestamp' },
-  updated_at: { names: ['updatedAt'], kind: 'timestamp' },
   is_deleted: { names: ['isDeleted'], kind: 'boolean' },
   deleted_at: { names: ['deletedAt'], kind: 'timestamp' },
 };
@@ -88,7 +86,6 @@ export async function ensureVendorSchema(dataSource: DataSource): Promise<void> 
           vendor_type = COALESCE(vendor_type, 'SUPPLIER'),
           status = COALESCE(status, 'ACTIVE'),
           created_at = COALESCE(created_at, now()),
-          updated_at = COALESCE(updated_at, created_at, now()),
           is_deleted = COALESCE(is_deleted, false),
           deleted_at = CASE
             WHEN is_deleted OR deleted_at IS NOT NULL THEN COALESCE(deleted_at, updated_at, created_at, now())
@@ -104,8 +101,10 @@ export async function ensureVendorSchema(dataSource: DataSource): Promise<void> 
         ALTER COLUMN status SET NOT NULL,
         ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP,
         ALTER COLUMN created_at SET NOT NULL,
-        ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP,
-        ALTER COLUMN updated_at SET NOT NULL,
+        ALTER COLUMN updated_at DROP DEFAULT,
+        ALTER COLUMN updated_at DROP NOT NULL,
+        ALTER COLUMN updated_by DROP DEFAULT,
+        ALTER COLUMN updated_by DROP NOT NULL,
         ALTER COLUMN is_deleted SET DEFAULT false,
         ALTER COLUMN is_deleted SET NOT NULL
     `);
