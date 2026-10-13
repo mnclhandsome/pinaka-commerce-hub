@@ -42,4 +42,12 @@ export class StoreVendorMappingService {
     if (!mapping) throw new NotFoundException('Active store-vendor mapping not found');
     return mapping;
   }
+
+  async unmapByStoreAndVendor(storeId: string, vendorId: string) {
+    const store = await this.merchants.getStoreById(storeId);
+    if (!store) throw new NotFoundException('Store not found');
+    const mapping = await this.mappings.deactivateByStoreAndVendor(store.id, vendorId);
+    if (!mapping) throw new NotFoundException('Active store-vendor mapping not found');
+    return mapping;
+  }
 }
