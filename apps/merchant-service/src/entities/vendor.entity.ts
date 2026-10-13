@@ -1,4 +1,4 @@
-import { Column, Entity, JoinColumn, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
+import { Column, Entity, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { Audited, AuditColumns, RecordStatus, VendorType } from './commerce-enums';
 import { StoreTypeEntity } from './store-type.entity';
 
@@ -7,6 +7,9 @@ export { RecordStatus as VendorStatus, VendorType } from './commerce-enums';
 @Entity('vendors')
 @Audited()
 export class VendorEntity extends AuditColumns {
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz', nullable: true, default: () => 'NULL' })
+  override updatedAt!: Date;
+
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
