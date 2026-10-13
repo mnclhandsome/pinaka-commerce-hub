@@ -1,5 +1,5 @@
 import { storeSetup } from '../master/store-setup/store-setup';
-import { ValidationPipe, Inject, Controller, Get, Post, Put, Patch, Delete, Param, Body, Req, NotFoundException, BadRequestException, ConflictException, InternalServerErrorException, ForbiddenException } from '@nestjs/common';
+import { ValidationPipe, Inject, Controller, Get, Post, Put, Patch, Delete, Param, Body, Query, Req, NotFoundException, BadRequestException, ConflictException, InternalServerErrorException, ForbiddenException } from '@nestjs/common';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { Public } from '@pinaka-delivery-hub/auth';
 import { MerchantRepository } from '../merchant/merchant.repository';
@@ -265,27 +265,34 @@ export class AppController {
     this.requireOwnerRole(request.user?.role);
     const store = await this.merchantRepository.getStoreById(storeId);
     if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    const existing = await this.merchantRepository.getWebsiteConnection(storeId);
     const wordpressUrl = this.validateWordPressUrl(body.wordpressUrl);
-    const wordpressJwt = body.wordpressJwt?.trim();
-    if (!wordpressJwt) throw new BadRequestException('wordpressJwt is required');
+    const replacementJwt = body.wordpressJwt?.trim();
+    if (!replacementJwt && !existing?.encryptedJwt) {
+      throw new BadRequestException('wordpressJwt is required');
+    }
+    const wordpressJwt = replacementJwt
+      ? replacementJwt
+      : this.decryptConnectorSecret(existing!.encryptedJwt);
 
     const test = await this.pingWordPress(wordpressUrl, wordpressJwt);
     const connection = await this.merchantRepository.saveWebsiteConnection({
       storeId: store.id,
       merchantId: store.merchantId,
       wordpressUrl,
-      encryptedJwt: this.encryptConnectorSecret(wordpressJwt),
+      encryptedJwt: replacementJwt
+        ? this.encryptConnectorSecret(replacementJwt)
+        : existing!.encryptedJwt,
       status: test.ok ? 'CONNECTED' : 'NOT_CONNECTED',
       lastTestedAt: new Date(),
       lastTestMessage: test.message,
     });
-    const catalog = await this.syncStoreCatalog(store.merchantId, store.id, wordpressUrl, wordpressJwt);
     await this.merchantRepository.recordAuditLog(
       'STORE_WEBSITE_CONNECTOR_UPDATED',
       store.merchantId,
       store.id,
       'merchant',
-      { provider: 'WORDPRESS', wordpressUrl, status: connection.status, catalog },
+      { provider: 'WORDPRESS', wordpressUrl, status: connection.status },
     );
     return {
       success: true,
@@ -293,7 +300,6 @@ export class AppController {
       storeId: store.id,
       merchantId: store.merchantId,
       connector: this.toPublicConnector(connection),
-      catalog,
     };
   }
 
@@ -344,15 +350,15 @@ export class AppController {
     this.requireOwnerRole(request.user?.role);
     const store = await this.merchantRepository.getStoreById(storeId);
     if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
-    const connection = await this.merchantRepository.getWebsiteConnection(storeId);
-    if (!connection?.encryptedJwt || !connection.wordpressUrl) {
+    const connector = await this.merchantRepository.getWebsiteConnector(storeId);
+    if (!connector?.encryptedJwt || !connector.wordpressUrl) {
       throw new BadRequestException('Connect the WordPress site before syncing the catalog');
     }
     const catalog = await this.syncStoreCatalog(
       store.merchantId,
       store.id,
-      connection.wordpressUrl,
-      this.decryptConnectorSecret(connection.encryptedJwt),
+      connector.wordpressUrl,
+      this.decryptConnectorSecret(connector.encryptedJwt),
     );
     return {
       success: true,
@@ -361,6 +367,84 @@ export class AppController {
       merchantId: store.merchantId,
       catalog,
     };
+  }
+
+  @Post('stores/:storeId/catalog/sync/products')
+  async syncStoreProductsFromWebsite(
+    @Param('storeId') storeId: string,
+    @Req() request: { user?: { role?: string } },
+  ) {
+    const connection = await this.requireWordPressConnection(storeId, request.user?.role);
+    const count = await this.merchantRepository.syncStoreProductsFromWordPress(connection);
+    return {
+      success: true,
+      message: `Synced ${count} products.`,
+      storeId: connection.storeId,
+      productCount: count,
+    };
+  }
+
+  @Post('stores/:storeId/catalog/sync/categories')
+  async syncStoreCategoriesFromWebsite(
+    @Param('storeId') storeId: string,
+    @Req() request: { user?: { role?: string } },
+  ) {
+    const connection = await this.requireWordPressConnection(storeId, request.user?.role);
+    const count = await this.merchantRepository.syncStoreCategoriesFromWordPress(connection);
+    return {
+      success: true,
+      message: `Synced ${count} categories.`,
+      storeId: connection.storeId,
+      categoryCount: count,
+    };
+  }
+
+  @Post('stores/:storeId/catalog/sync/attributes')
+  async syncStoreAttributesFromWebsite(
+    @Param('storeId') storeId: string,
+    @Req() request: { user?: { role?: string } },
+  ) {
+    const connection = await this.requireWordPressConnection(storeId, request.user?.role);
+    const count = await this.merchantRepository.syncStoreAttributesFromWordPress(connection);
+    return {
+      success: true,
+      message: `Synced ${count} attributes.`,
+      storeId: connection.storeId,
+      attributeCount: count,
+    };
+  }
+
+  @Post('stores/:storeId/catalog/sync/tags')
+  async syncStoreTagsFromWebsite(
+    @Param('storeId') storeId: string,
+    @Req() request: { user?: { role?: string } },
+  ) {
+    const connection = await this.requireWordPressConnection(storeId, request.user?.role);
+    const count = await this.merchantRepository.syncStoreTagsFromWordPress(connection);
+    return {
+      success: true,
+      message: `Synced ${count} tags.`,
+      storeId: connection.storeId,
+      tagCount: count,
+    };
+  }
+
+  @Get('stores/:storeId/catalog/products/sku/:sku')
+  async getStoreProductBySku(
+    @Param('storeId') storeId: string,
+    @Param('sku') sku: string,
+  ) {
+    const store = await this.merchantRepository.getStoreById(storeId);
+    if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    return this.merchantRepository.findStoreProductBySku(store.id, sku);
+  }
+
+  @Get('stores/:storeId/catalog/products/:sku')
+  getStoreProduct(
+    @Param('storeId') storeId: string,
+    @Param('sku') sku: string,
+  ) {
+    return this.getStoreProductBySku(storeId, sku);
   }
 
   @Get('stores/:storeId/catalog')
@@ -377,6 +461,92 @@ export class AppController {
       categories: catalog.categories,
       products: catalog.products,
     };
+  }
+
+  @Get('store/:storeId/store-categories')
+  async getSavedStoreCategories(@Param('storeId') storeId: string) {
+    const store = await this.merchantRepository.getStoreById(storeId);
+    if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    const payload = await this.merchantRepository.getStoreCategoriesByStoreId(store.id);
+    return payload;
+  }
+
+  @Get('store/:storeId/products/search')
+  async searchStoreProducts(
+    @Param('storeId') storeId: string,
+    @Query('search') search?: string,
+  ) {
+    const store = await this.merchantRepository.getStoreById(storeId);
+    if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    return this.merchantRepository.searchStoreProducts(store.id, search ?? '');
+  }
+
+  @Get('store/:storeId/products/:productId/variations')
+  async getStoreProductVariations(
+    @Param('storeId') storeId: string,
+    @Param('productId') productId: string,
+  ) {
+    const store = await this.merchantRepository.getStoreById(storeId);
+    if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    const variations = await this.merchantRepository.getStoreProductVariations(store.id, productId);
+    if (!Array.isArray(variations) || variations.length === 0) return variations;
+
+    const variationIds = variations
+      .map((variation) =>
+        variation && typeof variation === 'object'
+          ? String((variation as Record<string, unknown>).id ?? '')
+          : '',
+      )
+      .filter((id) => /^\d+$/.test(id));
+    if (variationIds.length === 0) return variations;
+
+    const imageRows: Array<{ variation_id: string; image: unknown }> =
+      await this.merchantRepository.requireDataSource().query(
+        `
+        SELECT product.item->>'id' AS variation_id,
+               product.item->'image' AS image
+        FROM public.store_products AS catalog
+        CROSS JOIN LATERAL jsonb_array_elements(
+          CASE
+            WHEN jsonb_typeof(catalog.payload) = 'array' THEN catalog.payload
+            ELSE '[]'::jsonb
+          END
+        ) AS product(item)
+        WHERE catalog.store_id = $1::uuid
+          AND COALESCE(catalog.is_deleted, false) = false
+          AND product.item->>'id' = ANY($2::text[])
+        `,
+        [store.id, variationIds],
+      );
+    const imagesByVariationId = new Map(
+      imageRows.map((row) => [String(row.variation_id), row.image]),
+    );
+
+    return variations.map((variation) => {
+      if (!variation || typeof variation !== 'object' || Array.isArray(variation)) return variation;
+      const record = variation as Record<string, unknown>;
+      const existingImages = Array.isArray(record.images) ? record.images : [];
+      const storedImage = imagesByVariationId.get(String(record.id ?? ''));
+      const image = storedImage ?? record.image ?? existingImages[0] ?? null;
+      const images = image === null
+        ? []
+        : [image && typeof image === 'object' ? image : { src: image }];
+      return {
+        ...record,
+        image,
+        images,
+      };
+    });
+  }
+
+  @Get('store/:storeId/store-categories/:categoryId/products')
+  async getStoreProductsByCategory(
+    @Param('storeId') storeId: string,
+    @Param('categoryId') categoryId: string,
+  ) {
+    const store = await this.merchantRepository.getStoreById(storeId);
+    if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    return this.merchantRepository.getStoreProductsByCategoryId(store.id, categoryId);
   }
 
   @Get('stores/:storeId/configuration')
@@ -791,14 +961,46 @@ export class AppController {
   private decryptConnectorSecret(value: string): string {
     const [version, ivPart, ciphertextPart, tagPart] = value.split(':');
     if (version !== 'v1' || !ivPart || !ciphertextPart || !tagPart) {
-      throw new InternalServerErrorException('Stored website JWT cannot be decrypted');
+      throw new BadRequestException(
+        'The saved WordPress JWT is no longer valid. Edit the website connection and save the JWT token again.',
+      );
     }
-    const decipher = createDecipheriv('aes-256-gcm', this.connectorEncryptionKey(), Buffer.from(ivPart, 'base64url'));
-    decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
-    return Buffer.concat([
-      decipher.update(Buffer.from(ciphertextPart, 'base64url')),
-      decipher.final(),
-    ]).toString('utf8');
+    try {
+      const decipher = createDecipheriv(
+        'aes-256-gcm',
+        this.connectorEncryptionKey(),
+        Buffer.from(ivPart, 'base64url'),
+      );
+      decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
+      return Buffer.concat([
+        decipher.update(Buffer.from(ciphertextPart, 'base64url')),
+        decipher.final(),
+      ]).toString('utf8');
+    } catch {
+      throw new BadRequestException(
+        'The saved WordPress JWT was encrypted with a different server key. Edit the website connection and save the JWT token again.',
+      );
+    }
+  }
+
+  private async requireWordPressConnection(storeId: string, role?: string) {
+    this.requireOwnerRole(role);
+    const store = await this.merchantRepository.getStoreById(storeId);
+    if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    const connector = await this.merchantRepository.getWebsiteConnection(store.id)
+      || await this.merchantRepository.getWebsiteConnection(storeId);
+    if (!connector?.encryptedJwt || !connector.wordpressUrl) {
+      throw new BadRequestException('Connect the WordPress site before syncing the catalog');
+    }
+    if (connector.status !== 'CONNECTED') {
+      throw new BadRequestException('Validate the WordPress connection before syncing.');
+    }
+    return {
+      merchantId: store.merchantId,
+      storeId: store.id,
+      wordpressUrl: connector.wordpressUrl,
+      wordpressJwt: this.decryptConnectorSecret(connector.encryptedJwt),
+    };
   }
 
   private async syncStoreCatalog(

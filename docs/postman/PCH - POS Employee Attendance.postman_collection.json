@@ -1,0 +1,318 @@
+{
+  "info": {
+    "_postman_id": "7db48408-c989-4e20-9c1e-0010a741fdb0",
+    "name": "PCH - POS Employee Attendance",
+    "description": "Run in order: POS Employee Login, Clock In, Current Attendance, Clock Out, Attendance History. For POS login, set bootstrapToken to an active PCH bearer session. The collection includes the test-only fixture values.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "POS Employee Login - Capture Token",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{bootstrapToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/pos/auth/login",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "pos",
+            "auth",
+            "login"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"employeeCode\": \"{{employeeCode}}\",\n  \"pin\": \"{{pin}}\",\n  \"merchantId\": \"{{merchantId}}\",\n  \"storeId\": \"{{storeId}}\",\n  \"registerId\": \"ATT-REG-01\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Login succeeds', () => pm.response.to.have.status(200));",
+              "const body=pm.response.json();",
+              "if (body.accessToken) pm.collectionVariables.set('posAccessToken', body.accessToken);",
+              "pm.test('Access token returned', () => pm.expect(body.accessToken).to.be.a('string').and.not.empty);"
+            ]
+          }
+        }
+      ],
+      "description": "The merchant-service currently protects POS login with its global session guard. Set bootstrapToken to an active PCH bearer session (from your normal app login) before running this request; the response stores posAccessToken for attendance history endpoints."
+    },
+    {
+      "name": "Clock In",
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/attendance/clock-in",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "clock-in"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"employeeCode\": \"{{employeeCode}}\",\n  \"pin\": \"{{pin}}\",\n  \"merchantId\": \"{{merchantId}}\",\n  \"storeId\": \"{{storeId}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Clock in succeeds', () => pm.response.to.have.status(200));",
+              "const body=pm.response.json();",
+              "if (body.attendance?.id) pm.collectionVariables.set('attendanceId', body.attendance.id);",
+              "pm.test('Attendance record returned', () => pm.expect(body.attendance?.status).to.eql('PRESENT'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Current Attendance",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{posAccessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/attendance/me",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "me"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Current attendance query succeeds', () => pm.response.to.have.status(200));",
+              "pm.test('Open attendance belongs to the test employee', () => pm.expect(pm.response.json().currentAttendance?.employeeCode).to.eql(pm.collectionVariables.get('employeeCode')));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Clock Out",
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/attendance/clock-out",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance",
+            "clock-out"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"employeeCode\": \"{{employeeCode}}\",\n  \"pin\": \"{{pin}}\",\n  \"merchantId\": \"{{merchantId}}\",\n  \"storeId\": \"{{storeId}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Clock out succeeds', () => pm.response.to.have.status(200));",
+              "const record = Array.isArray(pm.response.json().attendance) ? pm.response.json().attendance[0] : pm.response.json().attendance;",
+              "pm.test('Attendance record is completed', () => pm.expect(record?.status).to.eql('COMPLETED'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Attendance History",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{posAccessToken}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/attendance?merchantId={{merchantId}}&storeId={{storeId}}&employeeCode={{employeeCode}}&page=1&limit=25",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "attendance"
+          ],
+          "query": [
+            {
+              "key": "merchantId",
+              "value": "{{merchantId}}",
+              "disabled": false
+            },
+            {
+              "key": "storeId",
+              "value": "{{storeId}}",
+              "disabled": false
+            },
+            {
+              "key": "employeeCode",
+              "value": "{{employeeCode}}",
+              "disabled": false
+            },
+            {
+              "key": "page",
+              "value": "1",
+              "disabled": false
+            },
+            {
+              "key": "limit",
+              "value": "25",
+              "disabled": false
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Attendance history query succeeds', () => pm.response.to.have.status(200));",
+              "pm.test('History contains a completed test record', () => pm.expect(pm.response.json().records.some(r => r.status === 'COMPLETED')).to.eql(true));"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "bootstrapToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3013",
+      "type": "string"
+    },
+    {
+      "key": "merchantId",
+      "value": "375a62af-4c5a-4ef8-9d70-c2ffb7112bdc",
+      "type": "string"
+    },
+    {
+      "key": "storeId",
+      "value": "cc6416a6-3873-403e-b7cd-6c537ab0e0d3",
+      "type": "string"
+    },
+    {
+      "key": "employeeCode",
+      "value": "ATT-EMP-20261010",
+      "type": "string"
+    },
+    {
+      "key": "pin",
+      "value": "246810",
+      "type": "string"
+    },
+    {
+      "key": "posAccessToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "attendanceId",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}

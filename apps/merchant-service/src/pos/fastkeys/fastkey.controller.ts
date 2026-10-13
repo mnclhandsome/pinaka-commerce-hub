@@ -5,6 +5,7 @@ import {
   Get,
   HttpCode,
   Inject,
+  Param,
   Post,
   Req,
   UploadedFile,
@@ -19,6 +20,7 @@ import { RequireAuth } from '../../modules/shared/session-auth.guard';
 import {
   AddFastkeyProductsDto,
   CreateFastkeyDto,
+  DeleteFastkeyProductDto,
   UpdateFastkeyDto,
 } from './fastkey.dto';
 import { FastkeyService } from './fastkey.service';
@@ -43,9 +45,13 @@ const fastkeyImageUpload = FileInterceptor('fastkey_image', {
     file: { mimetype: string },
     callback: (error: Error | null, accept: boolean) => void,
   ) => {
-    const allowed = ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype);
+    const allowed = ['image/jpeg', 'image/png', 'image/webp'].includes(
+      file.mimetype,
+    );
     callback(
-      allowed ? null : new BadRequestException('Fast Key image must be JPG, PNG, or WebP'),
+      allowed
+        ? null
+        : new BadRequestException('Fast Key image must be JPG, PNG, or WebP'),
       allowed,
     );
   },
@@ -125,6 +131,47 @@ export class FastkeyController {
     );
   }
 
+  @Get('get-all-fastkeys-images')
+  @RequireAuth()
+  getAllFastkeyImages(@Req() request: AuthenticatedRequest) {
+    return this.service.getAllFastkeyImages(
+      request.user?.id,
+      this.requestOrigin(request),
+    );
+  }
+
+  @Get(['get-by-fastkey-id/:fastkey_id', 'get-by-fastkey-id'])
+  @RequireAuth()
+  getByFastkeyId(
+    @Param('fastkey_id') fastkeyId: string | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.getByFastkeyId(
+      fastkeyId,
+      request.user?.id,
+      this.requestOrigin(request),
+    );
+  }
+
+  @Get(['delete-fastkey/:fastkey_id', 'delete-fastkey'])
+  @RequireAuth()
+  deleteFastkey(
+    @Param('fastkey_id') fastkeyId: string | undefined,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.delete(fastkeyId, request.user?.id);
+  }
+
+  @Post(['delete-product', 'delete_product'])
+  @HttpCode(200)
+  @RequireAuth()
+  deleteProduct(
+    @Body() dto: DeleteFastkeyProductDto,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.deleteProduct(dto, request.user?.id);
+  }
+
   @Post(['add-products', 'add_products', 'fastkeys/add-products'])
   @HttpCode(200)
   @RequireAuth()
@@ -139,7 +186,11 @@ export class FastkeyController {
     );
   }
 
-  @Post(['update-fastkey-products', 'update/fastkey-products', 'update_fastkey_products'])
+  @Post([
+    'update-fastkey-products',
+    'update/fastkey-products',
+    'update_fastkey_products',
+  ])
   @HttpCode(200)
   @RequireAuth()
   updateProducts(
@@ -159,18 +210,20 @@ export class FastkeyController {
       ? forwardedProto[0]
       : forwardedProto?.split(',')[0]?.trim() || request.protocol || 'http';
     const forwardedHost = request.headers?.['x-forwarded-host'];
-    const host = (Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost)
-      || request.get('host')
-      || 'localhost:3003';
+    const host =
+      (Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost) ||
+      request.get('host') ||
+      'localhost:3003';
     return `${protocol}://${host}`;
   }
 
   private async saveImage(file: UploadedFastkeyImage): Promise<string> {
-    const extension = file.mimetype === 'image/png'
-      ? '.png'
-      : file.mimetype === 'image/webp'
-        ? '.webp'
-        : '.jpg';
+    const extension =
+      file.mimetype === 'image/png'
+        ? '.png'
+        : file.mimetype === 'image/webp'
+          ? '.webp'
+          : '.jpg';
     const filename = `${randomUUID()}${extension}`;
     await writeFile(join(fastkeyImageDirectory, filename), file.buffer);
     return `/uploads/fastkeys/${filename}`;

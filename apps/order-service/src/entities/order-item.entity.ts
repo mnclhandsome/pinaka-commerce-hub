@@ -5,22 +5,22 @@ export class OrderItemEntity {
   @PrimaryColumn({ type: 'varchar', length: 100 })
   id!: string;
 
-  @Column({ type: 'varchar', length: 100 })
+  @Column({ name: 'order_id', type: 'uuid' })
   orderId!: string;
 
-  @Column({ type: 'varchar', length: 100 })
+  @Column({ name: 'product_id', type: 'varchar', length: 100 })
   productId!: string;
 
-  @Column({ type: 'varchar', length: 255 })
+  @Column({ name: 'product_name', type: 'varchar', length: 255 })
   productName!: string;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  @Column({ name: 'quantity', type: 'decimal', precision: 10, scale: 2 })
   quantity!: number;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  @Column({ name: 'unit_price', type: 'decimal', precision: 10, scale: 2 })
   unitPrice!: number;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  @Column({ name: 'total_price', type: 'decimal', precision: 10, scale: 2 })
   totalPrice!: number;
 
   @Column({ type: 'jsonb', nullable: true })

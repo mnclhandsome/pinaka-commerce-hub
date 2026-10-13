@@ -45,7 +45,6 @@ export class UpdateFastkeyDto {
 
 export class FastkeyProductDto {
   @IsString()
-  @IsUUID()
   product_id!: string;
 
   @Type(() => Number)
@@ -66,4 +65,15 @@ export class AddFastkeyProductsDto {
   @ValidateNested({ each: true })
   @Type(() => FastkeyProductDto)
   products?: FastkeyProductDto[];
+}
+
+export class DeleteFastkeyProductDto {
+  @IsOptional()
+  @IsString()
+  @IsUUID()
+  fastkey_id?: string;
+
+  @IsOptional()
+  @IsString()
+  product_id?: string;
 }

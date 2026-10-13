@@ -763,6 +763,7 @@ export class MerchantRepository implements OnModuleInit {
     await ensureStoreRoleTemplateSchema(this.dataSource);
     await ensureEmployeeStoreSchema(this.dataSource);
     await this.migrateEncryptedPinsToPlaintext();
+    await this.ensureStoreCategoriesTable();
     // Existing merchant_vendors tables may predate this pairwise key. The
     // mapping endpoint's ON CONFLICT target requires a matching unique index.
     await this.dataSource.query(`
@@ -2159,21 +2160,22 @@ export class MerchantRepository implements OnModuleInit {
   async getWebsiteConnector(
     storeId: string,
   ): Promise<StoreWebsiteConnectorConfig | null> {
-    const connection = await this.websiteConnectionRepo.findOneBy({ storeId });
-    if (connection) {
-      return {
-        provider: 'WORDPRESS',
-        wordpressUrl: connection.wordpressUrl,
-        encryptedJwt: connection.encryptedJwt,
-        updatedAt: connection.updatedAt.toISOString(),
-      };
-    }
     const store = await this.storeRepo
       .createQueryBuilder('store')
       .addSelect('store.websiteConnector')
       .where('store.id = :storeId', { storeId })
       .getOne();
-    return store?.websiteConnector ?? null;
+    if (store?.websiteConnector) return store.websiteConnector;
+
+    const connection = await this.websiteConnectionRepo.findOneBy({ storeId });
+    return connection
+      ? {
+          provider: 'WORDPRESS',
+          wordpressUrl: connection.wordpressUrl,
+          encryptedJwt: connection.encryptedJwt,
+          updatedAt: connection.updatedAt.toISOString(),
+        }
+      : null;
   }
 
   async saveWebsiteConnection(fields: {
@@ -2959,35 +2961,670 @@ export class MerchantRepository implements OnModuleInit {
     storeId: string;
     wordpressUrl: string;
     wordpressJwt: string;
-  }): Promise<{ categoryCount: number; productCount: number }> {
-    const { categories, response } = await this.fetchWordPressCategoryCatalog(
+  }): Promise<{ categoryCount: number; productCount: number; attributeCount: number; tagCount: number }> {
+    const productCount = await this.syncStoreProductsFromWordPress(params);
+    const categoryCount = await this.syncStoreCategoriesFromWordPress(params);
+    const attributeCount = await this.syncStoreAttributesFromWordPress(params);
+    const tagCount = await this.syncStoreTagsFromWordPress(params);
+    return { categoryCount, productCount, attributeCount, tagCount };
+  }
+
+  async syncStoreProductsFromWordPress(params: {
+    storeId: string;
+    wordpressUrl: string;
+    wordpressJwt: string;
+  }): Promise<number> {
+    const products = await this.fetchWooCollection(
       params.wordpressUrl,
       params.wordpressJwt,
+      '/wp-json/wc/v3/products',
+      { per_page: '100' },
     );
-    let productCount = 0;
-    const payload: Array<Record<string, unknown>> = [];
-    for (const node of categories) {
-      if (!Number.isFinite(Number(node.id))) continue;
-      const savedCategory = await this.upsertStoreCategory(
-        params.merchantId,
-        params.storeId,
-        node,
+    const variations: unknown[] = [];
+    for (const product of products) {
+      const record = product as Record<string, unknown>;
+      const id = Number(record.id);
+      const variationIds = Array.isArray(record.variations) ? record.variations : [];
+      if (record.type !== 'variable' || !Number.isFinite(id) || variationIds.length === 0) continue;
+      const children = await this.fetchWooCollection(
+        params.wordpressUrl,
+        params.wordpressJwt,
+        `/wp-json/wc/v3/products/${id}/variations`,
+        { per_page: '100' },
       );
-      const products = Array.isArray(node.products) ? node.products : [];
-      for (const product of products) {
-        if (!Number.isFinite(Number(product.id))) continue;
-        await this.upsertStoreProduct(
-          params.merchantId,
-          params.storeId,
-          savedCategory,
-          product,
-        );
-        payload.push(this.storeProductPayload(node, product));
-        productCount += 1;
-      }
+      variations.push(...children);
     }
-    await this.saveStoreCategoriesProducts(params.storeId, payload, response);
-    return { categoryCount: categories.length, productCount };
+    const merged = new Map<string, unknown>();
+    for (const item of [...products, ...variations]) {
+      const record = item as Record<string, unknown>;
+      if (record?.id === undefined || record?.id === null) continue;
+      merged.set(String(record.id), item);
+    }
+    const payload = [...merged.values()];
+    await this.saveStoreProductPayload(params.storeId, payload);
+    return payload.length;
+  }
+
+  async syncStoreCategoriesFromWordPress(params: {
+    storeId: string;
+    wordpressUrl: string;
+    wordpressJwt: string;
+  }): Promise<number> {
+    const categories = await this.fetchWooCollection(
+      params.wordpressUrl,
+      params.wordpressJwt,
+      '/wp-json/wc/v3/products/categories',
+      { per_page: '100', hide_empty: 'true', parent: '0' },
+    );
+    await this.saveStoreCategoryColumn(params.storeId, 'payload', categories);
+    return categories.length;
+  }
+
+  async syncStoreAttributesFromWordPress(params: {
+    storeId: string;
+    wordpressUrl: string;
+    wordpressJwt: string;
+  }): Promise<number> {
+    const attributes = await this.fetchWooCollection(
+      params.wordpressUrl,
+      params.wordpressJwt,
+      '/wp-json/wc/v3/products/attributes',
+      { per_page: '100' },
+    );
+    await this.saveStoreCategoryColumn(params.storeId, 'attributes', attributes);
+    return attributes.length;
+  }
+
+  async syncStoreTagsFromWordPress(params: {
+    storeId: string;
+    wordpressUrl: string;
+    wordpressJwt: string;
+  }): Promise<number> {
+    const tags = await this.fetchWooCollection(
+      params.wordpressUrl,
+      params.wordpressJwt,
+      '/wp-json/wc/v3/products/tags',
+      { per_page: '100' },
+    );
+    await this.saveStoreCategoryColumn(params.storeId, 'tags', tags);
+    return tags.length;
+  }
+
+  private async fetchWooCollection(
+    wordpressUrl: string,
+    wordpressJwt: string,
+    path: string,
+    query: Record<string, string>,
+  ): Promise<unknown[]> {
+    const baseUrl = wordpressUrl.replace(/\/+$/, '');
+    const items: unknown[] = [];
+    let page = 1;
+    let totalPages = 1;
+    while (page <= totalPages && page <= 200) {
+      const url = new URL(`${baseUrl}${path}`);
+      for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
+      url.searchParams.set('page', String(page));
+      const response = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${wordpressJwt}`,
+        },
+      });
+      if (!response.ok) {
+        throw new BadRequestException(
+          `WordPress API ${path} returned HTTP ${response.status}. Check the site URL and JWT token.`,
+        );
+      }
+      const body = await response.json();
+      const pageItems = Array.isArray(body) ? body : [];
+      items.push(...pageItems);
+      const reportedPages = Number(response.headers.get('x-wp-totalpages'));
+      totalPages = Number.isFinite(reportedPages) && reportedPages > 0 ? reportedPages : page;
+      if (pageItems.length === 0) break;
+      page += 1;
+    }
+    return items;
+  }
+
+  private async fetchWordPressParentCategories(
+    wordpressUrl: string,
+    wordpressJwt: string,
+  ): Promise<unknown[]> {
+    const baseUrl = wordpressUrl.replace(/\/+$/, '');
+    const categories: unknown[] = [];
+    let page = 1;
+    let totalPages = 1;
+    while (page <= totalPages && page <= 50) {
+      const url = new URL(`${baseUrl}/wp-json/wc/v3/products/categories`);
+      url.searchParams.set('page', String(page));
+      url.searchParams.set('per_page', '100');
+      url.searchParams.set('hide_empty', 'true');
+      url.searchParams.set('parent', '0');
+      const response = await fetch(url, {
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${wordpressJwt}`,
+        },
+      });
+      if (!response.ok) {
+        throw new BadRequestException(
+          `WordPress categories API returned HTTP ${response.status}. Check the site URL and JWT token.`,
+        );
+      }
+      const body = await response.json();
+      if (Array.isArray(body)) categories.push(...body);
+      const reportedPages = Number(response.headers.get('x-wp-totalpages'));
+      totalPages = Number.isFinite(reportedPages) && reportedPages > 0 ? reportedPages : page;
+      page += 1;
+    }
+    return categories;
+  }
+
+  private async ensureStoreCategoriesTable(): Promise<void> {
+    await this.dataSource.query(`
+      CREATE TABLE IF NOT EXISTS public.store_categories (
+        id uuid NOT NULL DEFAULT gen_random_uuid(),
+        store_id uuid NOT NULL,
+        payload jsonb NOT NULL DEFAULT '[]'::jsonb,
+        created_by uuid,
+        updated_by uuid,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        is_deleted boolean NOT NULL DEFAULT false,
+        CONSTRAINT store_categories_pkey PRIMARY KEY (id),
+        CONSTRAINT store_categories_store_id_fkey FOREIGN KEY (store_id)
+          REFERENCES public.stores (id)
+      )
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE public.store_categories
+      ADD COLUMN IF NOT EXISTS attributes jsonb
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE public.store_categories
+      ADD COLUMN IF NOT EXISTS tags jsonb
+    `);
+    await this.dataSource.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS store_categories_store_id_uidx
+      ON public.store_categories (store_id)
+    `);
+  }
+
+  private async saveStoreProductPayload(
+    storeId: string,
+    products: unknown[],
+  ): Promise<void> {
+    await this.ensureStoreProductsStoreIdUniqueIndex();
+    await this.dataSource.query(
+      `INSERT INTO public.store_products (store_id, payload, updated_at)
+       VALUES ($1::uuid, $2::jsonb, now())
+       ON CONFLICT (store_id)
+       DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), is_deleted = false`,
+      [storeId, JSON.stringify(products)],
+    );
+  }
+
+  private async saveStoreCategoryColumn(
+    storeId: string,
+    column: 'payload' | 'attributes' | 'tags',
+    value: unknown[],
+  ): Promise<void> {
+    await this.ensureStoreCategoriesTable();
+    const json = JSON.stringify(value);
+    if (column === 'payload') {
+      await this.dataSource.query(
+        `INSERT INTO public.store_categories (store_id, payload, updated_at)
+         VALUES ($1::uuid, $2::jsonb, now())
+         ON CONFLICT (store_id)
+         DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), is_deleted = false`,
+        [storeId, json],
+      );
+      return;
+    }
+    if (column === 'attributes') {
+      await this.dataSource.query(
+        `INSERT INTO public.store_categories (store_id, attributes, updated_at)
+         VALUES ($1::uuid, $2::jsonb, now())
+         ON CONFLICT (store_id)
+         DO UPDATE SET attributes = EXCLUDED.attributes, updated_at = now(), is_deleted = false`,
+        [storeId, json],
+      );
+      return;
+    }
+    await this.dataSource.query(
+      `INSERT INTO public.store_categories (store_id, tags, updated_at)
+       VALUES ($1::uuid, $2::jsonb, now())
+       ON CONFLICT (store_id)
+       DO UPDATE SET tags = EXCLUDED.tags, updated_at = now(), is_deleted = false`,
+      [storeId, json],
+    );
+  }
+
+  private async saveStoreCategories(
+    storeId: string,
+    payload: unknown[],
+  ): Promise<void> {
+    await this.ensureStoreCategoriesTable();
+    await this.dataSource.query(
+      `INSERT INTO public.store_categories (store_id, payload, updated_at)
+       VALUES ($1::uuid, $2::jsonb, now())
+       ON CONFLICT (store_id)
+       DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), is_deleted = false`,
+      [storeId, JSON.stringify(payload)],
+    );
+  }
+
+  async getStoreCategoriesByStoreId(storeId: string): Promise<unknown> {
+    await this.ensureStoreCategoriesTable();
+    const rows = await this.dataSource.query(
+      `SELECT payload
+       FROM public.store_categories
+       WHERE store_id = $1::uuid
+         AND COALESCE(is_deleted, false) = false
+       LIMIT 1`,
+      [storeId],
+    );
+    return rows[0]?.payload ?? null;
+  }
+
+  async findStoreProductBySku(storeId: string, sku: string): Promise<unknown[]> {
+    let code = String(sku ?? '').trim();
+    try {
+      code = decodeURIComponent(code).trim();
+    } catch {
+      throw new BadRequestException('sku is not valid');
+    }
+    if (!code) throw new BadRequestException('sku is required');
+    let rows: Array<{ product?: unknown }> = [];
+    try {
+      rows = await this.dataSource.query(
+        `SELECT product
+         FROM public.store_products AS catalog
+         CROSS JOIN LATERAL jsonb_array_elements(
+           CASE
+             WHEN jsonb_typeof(catalog.payload) = 'array' THEN catalog.payload
+             ELSE '[]'::jsonb
+           END
+         ) AS product
+         WHERE catalog.store_id = $1::uuid
+           AND COALESCE(catalog.is_deleted, false) = false
+           AND product->>'sku' = $2`,
+        [storeId, code],
+      );
+    } catch (error: unknown) {
+      const postgresCode = error && typeof error === 'object'
+        ? (error as { code?: string; driverError?: { code?: string } }).code
+          ?? (error as { driverError?: { code?: string } }).driverError?.code
+        : undefined;
+      if (postgresCode === '42P01' || postgresCode === '42703') return [];
+      throw error;
+    }
+    return rows
+      .map((row) => row.product)
+      .filter((product) => product !== undefined && product !== null);
+  }
+
+  async searchStoreProducts(
+    storeId: string,
+    search: string,
+  ): Promise<unknown[] | null> {
+    const term = String(search ?? '').trim();
+    if (!term) return null;
+    const pattern = `%${term.replace(/[\\%_]/g, '\\$&')}%`;
+    let rows: Array<{ products?: unknown }> = [];
+    try {
+      rows = await this.dataSource.query(
+        `SELECT COALESCE(jsonb_agg(match.product), '[]'::jsonb) AS products
+         FROM (
+           SELECT product
+           FROM public.store_products AS catalog
+           CROSS JOIN LATERAL jsonb_array_elements(
+             CASE
+               WHEN jsonb_typeof(catalog.payload) = 'array' THEN catalog.payload
+               ELSE '[]'::jsonb
+             END
+           ) AS product
+           WHERE catalog.store_id = $1::uuid
+             AND COALESCE(catalog.is_deleted, false) = false
+             AND (
+               COALESCE(product->>'name', '') ILIKE $2 ESCAPE '\\'
+               OR COALESCE(product->>'sku', '') ILIKE $2 ESCAPE '\\'
+               OR COALESCE(product->>'slug', '') ILIKE $2 ESCAPE '\\'
+             )
+           ORDER BY product->>'name'
+           LIMIT 50
+         ) AS match`,
+        [storeId, pattern],
+      );
+    } catch (error: unknown) {
+      const code =
+        error && typeof error === 'object'
+          ? (error as { code?: string; driverError?: { code?: string } }).code
+            ?? (error as { driverError?: { code?: string } }).driverError?.code
+          : undefined;
+      if (code === '42P01' || code === '42703') return null;
+      throw error;
+    }
+    const products = rows[0]?.products;
+    if (!Array.isArray(products) || products.length === 0) return null;
+    return products.map((product) =>
+      this.presentWooProduct(this.asRecord(product) ?? {}, null),
+    );
+  }
+
+  async getStoreProductVariations(
+    storeId: string,
+    productId: string,
+  ): Promise<unknown[] | null> {
+    const parentId = String(productId ?? '').trim();
+
+    if (!/^\d+$/.test(parentId)) {
+      throw new BadRequestException('productId must be a number');
+    }
+
+    let rows: Array<{ products?: unknown }> = [];
+
+    try {
+      rows = await this.dataSource.query(
+        `
+        WITH catalog_products AS MATERIALIZED (
+          SELECT product.item
+          FROM public.store_products AS catalog
+          CROSS JOIN LATERAL jsonb_array_elements(
+            CASE
+              WHEN jsonb_typeof(catalog.payload) = 'array'
+                THEN catalog.payload
+              ELSE '[]'::jsonb
+            END
+          ) AS product(item)
+          WHERE catalog.store_id = $1::uuid
+            AND COALESCE(catalog.is_deleted, false) = false
+        ),
+        parent_variations AS (
+          SELECT variation.id AS variation_id
+          FROM catalog_products AS parent
+          CROSS JOIN LATERAL jsonb_array_elements_text(
+            CASE
+              WHEN jsonb_typeof(parent.item->'variations') = 'array'
+                THEN parent.item->'variations'
+              ELSE '[]'::jsonb
+            END
+          ) AS variation(id)
+          WHERE parent.item->>'id' = $2
+        ),
+        matched_products AS (
+          SELECT product.item
+          FROM catalog_products AS product
+          WHERE product.item->>'parent_id' = $2
+
+          UNION
+
+          SELECT child.item
+          FROM catalog_products AS child
+          INNER JOIN parent_variations AS variation
+            ON child.item->>'id' = variation.variation_id
+          WHERE child.item->>'id' <> $2
+        )
+        SELECT COALESCE(
+          jsonb_agg(
+            matched.item
+            ORDER BY
+              matched.item->>'menu_order',
+              matched.item->>'id'
+          ),
+          '[]'::jsonb
+        ) AS products
+        FROM matched_products AS matched
+        `,
+        [storeId, parentId],
+      );
+    } catch (error: unknown) {
+      const code =
+        error && typeof error === 'object'
+          ? (
+              error as {
+                code?: string;
+                driverError?: { code?: string };
+              }
+            ).code ??
+            (
+              error as {
+                driverError?: { code?: string };
+              }
+            ).driverError?.code
+          : undefined;
+
+      if (code === '42P01' || code === '42703') {
+        return [];
+      }
+
+      throw error;
+    }
+
+    const products = rows[0]?.products;
+
+    if (!Array.isArray(products) || products.length === 0) {
+      return [];
+    }
+
+    return products.map((product) =>
+      this.presentWooProduct(this.asRecord(product) ?? {}, null),
+    );
+  }
+
+  async getStoreProductsByCategoryId(
+    storeId: string,
+    categoryId: string,
+  ): Promise<unknown[] | null> {
+    const categoryKey = String(categoryId ?? '').trim();
+    if (!/^\d+$/.test(categoryKey)) {
+      throw new BadRequestException('categoryId must be a number');
+    }
+    const [productRows, categoryRows] = await Promise.all([
+      this.dataSource.query(
+        `SELECT COALESCE(jsonb_agg(product), '[]'::jsonb) AS products
+         FROM public.store_products AS catalog
+         CROSS JOIN LATERAL jsonb_array_elements(
+           CASE
+             WHEN jsonb_typeof(catalog.payload) = 'array' THEN catalog.payload
+             ELSE '[]'::jsonb
+           END
+         ) AS product
+         WHERE catalog.store_id = $1::uuid
+           AND COALESCE(catalog.is_deleted, false) = false
+           AND (
+             product->>'categoryId' = $2
+             OR EXISTS (
+               SELECT 1
+               FROM jsonb_array_elements(
+                 CASE
+                   WHEN jsonb_typeof(product->'categories') = 'array' THEN product->'categories'
+                   ELSE '[]'::jsonb
+                 END
+               ) AS category
+               WHERE category->>'id' = $2
+             )
+           )`,
+        [storeId, categoryKey],
+      ),
+      this.dataSource.query(
+        `SELECT category
+         FROM public.store_categories AS catalog
+         CROSS JOIN LATERAL jsonb_array_elements(
+           CASE
+             WHEN jsonb_typeof(catalog.payload) = 'array' THEN catalog.payload
+             ELSE '[]'::jsonb
+           END
+         ) AS category
+         WHERE catalog.store_id = $1::uuid
+           AND COALESCE(catalog.is_deleted, false) = false
+           AND category->>'id' = $2
+         LIMIT 1`,
+        [storeId, categoryKey],
+      ).catch((error: unknown) => {
+        const code =
+          error && typeof error === 'object'
+            ? (error as { code?: string; driverError?: { code?: string } }).code
+              ?? (error as { driverError?: { code?: string } }).driverError?.code
+            : undefined;
+        if (code === '42P01' || code === '42703') return [];
+        throw error;
+      }),
+    ]);
+    const products = productRows[0]?.products;
+    if (!Array.isArray(products) || products.length === 0) return null;
+    const category = this.asRecord(categoryRows[0]?.category);
+    return products.map((product) =>
+      this.presentWooProduct(this.asRecord(product) ?? {}, category),
+    );
+  }
+
+  private presentWooProduct(
+    product: Record<string, unknown>,
+    category: Record<string, unknown> | null,
+  ): Record<string, unknown> {
+    const value = (key: string): unknown =>
+      Object.prototype.hasOwnProperty.call(product, key) && product[key] !== undefined
+        ? product[key]
+        : null;
+    const dimensions = this.asRecord(product.dimensions);
+    return {
+      id: this.numberOrNull(product.id),
+      name: value('name'),
+      slug: value('slug'),
+      permalink: value('permalink'),
+      date_created: value('date_created'),
+      date_created_gmt: value('date_created_gmt'),
+      date_modified: value('date_modified'),
+      date_modified_gmt: value('date_modified_gmt'),
+      type: value('type'),
+      status: value('status'),
+      featured: value('featured'),
+      catalog_visibility: value('catalog_visibility'),
+      description: value('description'),
+      short_description: value('short_description'),
+      sku: value('sku'),
+      price: value('price'),
+      regular_price: value('regular_price'),
+      sale_price: value('sale_price'),
+      date_on_sale_from: value('date_on_sale_from'),
+      date_on_sale_from_gmt: value('date_on_sale_from_gmt'),
+      date_on_sale_to: value('date_on_sale_to'),
+      date_on_sale_to_gmt: value('date_on_sale_to_gmt'),
+      on_sale: value('on_sale'),
+      purchasable: value('purchasable'),
+      total_sales: value('total_sales'),
+      virtual: value('virtual'),
+      downloadable: value('downloadable'),
+      downloads: value('downloads'),
+      download_limit: value('download_limit'),
+      download_expiry: value('download_expiry'),
+      external_url: value('external_url'),
+      button_text: value('button_text'),
+      tax_status: value('tax_status'),
+      tax_class: value('tax_class'),
+      manage_stock: value('manage_stock'),
+      stock_quantity: value('stock_quantity'),
+      backorders: value('backorders'),
+      backorders_allowed: value('backorders_allowed'),
+      backordered: value('backordered'),
+      low_stock_amount: value('low_stock_amount'),
+      sold_individually: value('sold_individually'),
+      weight: value('weight'),
+      dimensions: dimensions
+        ? {
+            length: dimensions.length ?? null,
+            width: dimensions.width ?? null,
+            height: dimensions.height ?? null,
+          }
+        : null,
+      shipping_required: value('shipping_required'),
+      shipping_taxable: value('shipping_taxable'),
+      shipping_class: value('shipping_class'),
+      shipping_class_id: value('shipping_class_id'),
+      reviews_allowed: value('reviews_allowed'),
+      average_rating: value('average_rating'),
+      rating_count: value('rating_count'),
+      upsell_ids: value('upsell_ids'),
+      cross_sell_ids: value('cross_sell_ids'),
+      parent_id: value('parent_id'),
+      purchase_note: value('purchase_note'),
+      categories: this.productCategories(product, category),
+      brands: value('brands'),
+      tags: value('tags'),
+      images: this.productImages(product),
+      attributes: value('attributes'),
+      default_attributes: value('default_attributes'),
+      variations: value('variations'),
+      grouped_products: value('grouped_products'),
+      menu_order: value('menu_order'),
+      price_html: value('price_html'),
+      related_ids: value('related_ids'),
+      meta_data: value('meta_data'),
+      stock_status: value('stock_status'),
+      has_options: value('has_options'),
+      post_password: value('post_password'),
+      global_unique_id: value('global_unique_id'),
+      _links: value('_links'),
+    };
+  }
+
+  private productImages(product: Record<string, unknown>): unknown {
+    if (Array.isArray(product.images)) return product.images;
+    const src = this.textOrNull(product.image);
+    if (!src) return null;
+    return [{
+      id: null,
+      date_created: null,
+      date_created_gmt: null,
+      date_modified: null,
+      date_modified_gmt: null,
+      src,
+      name: null,
+      alt: null,
+      srcset: null,
+      sizes: null,
+      thumbnail: null,
+    }];
+  }
+
+  private productCategories(
+    product: Record<string, unknown>,
+    category: Record<string, unknown> | null,
+  ): Array<Record<string, unknown>> | null {
+    if (Array.isArray(product.categories) && product.categories.length > 0) {
+      const categories = product.categories
+        .map((item) => this.asRecord(item))
+        .filter((item): item is Record<string, unknown> => item !== null)
+        .map((item) => ({
+          name: this.textOrNull(item.name),
+          slug: this.textOrNull(item.slug),
+          id: this.numberOrNull(item.id),
+        }));
+      return categories.length > 0 ? categories : null;
+    }
+    const id = this.numberOrNull(category?.id ?? product.categoryId);
+    const name = this.textOrNull(category?.name ?? product.categoryName);
+    const slug = this.textOrNull(category?.slug);
+    if (id === null && name === null && slug === null) return null;
+    return [{ name, slug, id }];
+  }
+
+  private asRecord(value: unknown): Record<string, unknown> | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    return value as Record<string, unknown>;
+  }
+
+  private textOrNull(value: unknown): string | null {
+    if (value === null || value === undefined) return null;
+    const text = String(value).trim();
+    return text ? text : null;
+  }
+
+  private numberOrNull(value: unknown): number | null {
+    if (value === null || value === undefined || String(value).trim() === '') return null;
+    const amount = Number(value);
+    return Number.isFinite(amount) ? amount : null;
   }
 
   private storeProductPayload(
@@ -3003,6 +3640,10 @@ export class MerchantRepository implements OnModuleInit {
       type: record.type ?? null,
       image: product.image ?? null,
       price: product.price ?? null,
+      regular_price: record.regular_price ?? null,
+      sale_price: record.sale_price ?? null,
+      tax_status: record.tax_status ?? null,
+      tax_class: record.tax_class ?? null,
       categoryId: Number(category.id),
       categoryName: category.name ?? null,
       stock_status: record.stock_status ?? null,
@@ -3015,6 +3656,7 @@ export class MerchantRepository implements OnModuleInit {
     payload: Array<Record<string, unknown>>,
     response: unknown,
   ): Promise<void> {
+    await this.ensureStoreProductsStoreIdUniqueIndex();
     await this.dataSource.query(
       `INSERT INTO public.store_products (store_id, payload, store_categories_products, updated_at)
        VALUES ($1::uuid, $2::jsonb, $3::jsonb, now())
@@ -3025,6 +3667,13 @@ export class MerchantRepository implements OnModuleInit {
          updated_at = now()`,
       [storeId, JSON.stringify(payload), JSON.stringify(response)],
     );
+  }
+
+  private async ensureStoreProductsStoreIdUniqueIndex(): Promise<void> {
+    await this.dataSource.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS store_products_store_id_uidx
+      ON public.store_products (store_id)
+    `);
   }
 
   private async ensureStoreCategoriesProductsColumn(): Promise<void> {
@@ -3123,7 +3772,7 @@ export class MerchantRepository implements OnModuleInit {
   ): Promise<{ categories: WordPressCategoryNode[]; response: unknown }> {
     const baseUrl = wordpressUrl.replace(/\/+$/, '');
     const response = await fetch(
-      `${baseUrl}/wp-json/pinaka-pos/v1/categories/get-categories-products`,
+      `${baseUrl}/wp-json/wc/v3/products?per_page=20000`,
       {
         headers: {
           Accept: 'application/json',

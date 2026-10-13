@@ -1,10 +1,13 @@
 import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
-import { OrderRepository } from './order.repository';
+import { OrderUpdatesModule } from './modules/order-updates/order-updates.module';
+import { OrderPersistenceModule } from './order-persistence.module';
+import { OrderListPresenter } from './responses/order-list.presenter';
+import { OrderResponsePresenter } from './responses/order-response.presenter';
 
 @Module({
-  imports: [],
+  imports: [OrderPersistenceModule, OrderUpdatesModule],
   controllers: [AppController],
-  providers: [OrderRepository],
+  providers: [OrderResponsePresenter, OrderListPresenter],
 })
 export class AppModule {}

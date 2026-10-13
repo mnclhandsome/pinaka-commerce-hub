@@ -1,4 +1,4 @@
-import { Entity, PrimaryColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
 
 export enum OrderType {
   IN_STORE_POS = 'IN_STORE_POS',
@@ -32,57 +32,72 @@ export enum OrderStatus {
 
 @Entity('orders')
 export class OrderEntity {
-  @PrimaryColumn({ type: 'varchar', length: 100 })
-  id!: string; // e.g. "ORD-10045"
+  @PrimaryGeneratedColumn('uuid')
+  id!: string;
 
-  @Column({ type: 'varchar', length: 100 })
+  @Column({ name: 'order_number', type: 'varchar', length: 100 })
   orderNumber!: string;
 
-  @Column({ type: 'varchar', length: 100 })
+  @Column({ name: 'merchant_id', type: 'uuid' })
   merchantId!: string;
 
-  @Column({ type: 'varchar', length: 100 })
+  @Column({ name: 'store_id', type: 'uuid' })
   storeId!: string;
 
-  @Column({ type: 'varchar', length: 100, nullable: true })
+  @Column({ name: 'shift_id', type: 'varchar', length: 100, nullable: true })
   shiftId?: string;
 
-  @Column({ type: 'varchar', length: 150, default: 'Walk-in Customer' })
+  @Column({ name: 'local_shift_id', type: 'varchar', length: 100, nullable: true })
+  localShiftId?: string;
+
+  @Column({ name: 'client_order_id', type: 'varchar', length: 150, nullable: true })
+  clientOrderId?: string;
+
+  @Column({ type: 'boolean', default: false })
+  offline!: boolean;
+
+  @Column({ name: 'metadata', type: 'jsonb', nullable: true })
+  metadata?: Array<{ key: string; value: unknown }>;
+
+  @Column({ name: 'request_payload', type: 'jsonb', nullable: true })
+  requestPayload?: Record<string, unknown>;
+
+  @Column({ name: 'customer_name', type: 'varchar', length: 150, default: 'Walk-in Customer' })
   customerName!: string;
 
-  @Column({ type: 'varchar', length: 50, nullable: true })
+  @Column({ name: 'customer_phone', type: 'varchar', length: 50, nullable: true })
   customerPhone?: string;
 
-  @Column({ type: 'varchar', length: 50, default: OrderType.IN_STORE_POS })
+  @Column({ name: 'order_type', type: 'varchar', length: 50, default: OrderType.IN_STORE_POS })
   orderType!: OrderType;
 
-  @Column({ type: 'varchar', length: 50, default: PaymentMethod.CASH })
+  @Column({ name: 'payment_method', type: 'varchar', length: 50, default: PaymentMethod.CASH })
   paymentMethod!: PaymentMethod;
 
-  @Column({ type: 'varchar', length: 50, default: PaymentStatus.PAID })
+  @Column({ name: 'payment_status', type: 'varchar', length: 50, default: PaymentStatus.PAID })
   paymentStatus!: PaymentStatus;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  @Column({ name: 'subtotal', type: 'decimal', precision: 10, scale: 2 })
   subtotal!: number;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0.00 })
+  @Column({ name: 'tax_amount', type: 'decimal', precision: 10, scale: 2, default: 0.00 })
   taxAmount!: number;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0.00 })
+  @Column({ name: 'discount_amount', type: 'decimal', precision: 10, scale: 2, default: 0.00 })
   discountAmount!: number;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0.00 })
+  @Column({ name: 'tip_amount', type: 'decimal', precision: 10, scale: 2, default: 0.00 })
   tipAmount!: number;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  @Column({ name: 'total_amount', type: 'decimal', precision: 10, scale: 2 })
   totalAmount!: number;
 
-  @Column({ type: 'varchar', length: 50, default: OrderStatus.CREATED })
+  @Column({ name: 'order_status', type: 'varchar', length: 50, default: OrderStatus.CREATED })
   orderStatus!: OrderStatus;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
 }
