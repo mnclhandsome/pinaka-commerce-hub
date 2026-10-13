@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { existsSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { MerchantRepository } from '../../modules/merchant/merchant.repository';
 import { FileStorageService } from '../../modules/file-storage/file-storage.service';
 import { EmployeeEntity } from '../../entities/employee.entity';
@@ -215,6 +215,49 @@ export class FastkeyService {
       success: true,
       message: 'FastKey images fetched successfully',
       data,
+    };
+  }
+
+  async getStoreFastkeyImages(userId: string | undefined, origin: string) {
+    if (!userId) throw new UnauthorizedException('Authentication is required');
+
+    const repository = this.merchants
+      .requireDataSource()
+      .getRepository(StoreEmployeeFastkeyEntity);
+    const rows = await repository
+      .createQueryBuilder('fastkey')
+      .where('fastkey.isDeleted = :deleted', { deleted: false })
+      .andWhere("COALESCE(fastkey.fastkeyImage, '') <> ''")
+      .orderBy('fastkey.updatedAt', 'DESC')
+      .getMany();
+
+    const database = rows.map((row) => {
+      const fastkeyImage = String(row.fastkeyImage ?? '').trim();
+      return {
+        id: row.id,
+        store_id: row.storeId,
+        employee_id: row.employeeId,
+        fastkey_title: String(row.json?.fastkey_title ?? ''),
+        fastkey_image: fastkeyImage,
+        name: this.imageNameFromStoredValue(fastkeyImage),
+      };
+    });
+    const scanned = await this.scanFastkeyUploadFolders(origin);
+    const catalog: Record<
+      string,
+      Array<{ name: string; url: string; folder: string }>
+    > = {};
+    for (const type of ['2D', '3D']) {
+      if (scanned[type]?.length) catalog[type] = scanned[type];
+    }
+
+    return {
+      success: true,
+      message: 'FastKey images fetched successfully',
+      data: {
+        database,
+        ...catalog,
+      },
     };
   }
 
@@ -827,6 +870,79 @@ export class FastkeyService {
         product.wordpressId ??
         '',
     ).trim();
+  }
+
+  private fastkeyUploadDirectory(): string {
+    const configured = process.env.FASTKEY_UPLOAD_IMAGE_DIR?.trim();
+    if (configured) return configured;
+    return join(process.cwd(), 'uploads', 'fastkey-images');
+  }
+
+  private async scanFastkeyUploadFolders(origin: string) {
+    const root = resolve(this.fastkeyUploadDirectory());
+    const folders: Record<
+      string,
+      Array<{ name: string; url: string; folder: string }>
+    > = {};
+    if (!existsSync(root)) return folders;
+
+    const entries = await readdir(root, { withFileTypes: true });
+    const directories = entries
+      .filter(
+        (entry) =>
+          entry.isDirectory() &&
+          entry.name !== '.' &&
+          entry.name !== '..' &&
+          !entry.name.includes('..') &&
+          !entry.name.includes('/') &&
+          !entry.name.includes('\\'),
+      )
+      .sort((left, right) =>
+        left.name.localeCompare(right.name, undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        }),
+      );
+
+    for (const directory of directories) {
+      const directoryPath = resolve(root, directory.name);
+      if (!directoryPath.startsWith(root + sep) && directoryPath !== root) {
+        continue;
+      }
+
+      const files = await readdir(directoryPath, { withFileTypes: true });
+      const images = files
+        .filter(
+          (file) =>
+            file.isFile() && /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name),
+        )
+        .sort((left, right) =>
+          left.name.localeCompare(right.name, undefined, {
+            numeric: true,
+            sensitivity: 'base',
+          }),
+        )
+        .map((file) => ({
+          name: file.name,
+          folder: directory.name,
+          url: `${origin}/uploads/fastkey-images/${encodeURIComponent(directory.name)}/${encodeURIComponent(file.name)}`,
+        }));
+
+      if (images.length) folders[directory.name] = images;
+    }
+
+    return folders;
+  }
+
+  private imageNameFromStoredValue(value: string): string {
+    if (value.startsWith('data:')) return '';
+    const path = value.split('?')[0]?.split('#')[0] ?? value;
+    const segment = path.split('/').filter(Boolean).pop() ?? '';
+    try {
+      return decodeURIComponent(segment);
+    } catch {
+      return segment;
+    }
   }
 
   private fastkeyImageCatalogDirectory(): string {

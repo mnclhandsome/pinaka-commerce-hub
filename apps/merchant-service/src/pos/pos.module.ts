@@ -19,7 +19,10 @@ import { PosServiceChargeController } from './service-charges/pos-service-charge
 import { PosServiceChargeService } from './service-charges/pos-service-charge.service';
 import { PosTerminalMappingController } from './terminal-mappings/pos-terminal-mapping.controller';
 import { PosTerminalMappingService } from './terminal-mappings/pos-terminal-mapping.service';
-import { FastkeyController } from './fastkeys/fastkey.controller';
+import {
+  FastkeyController,
+  StoreFastkeyImageController,
+} from './fastkeys/fastkey.controller';
 import { FastkeyService } from './fastkeys/fastkey.service';
 import { PosEmployeeAttendanceModule } from './pos_employee_attendance/pos_employee_attendance.module';
 import { MerchantModule } from '../modules/merchant/merchant.module';
@@ -41,6 +44,7 @@ import { PosSafeTransactionsService } from './safe-transactions/pos-safe-transac
     PosCardPaymentController,
     PosTerminalMappingController,
     FastkeyController,
+    StoreFastkeyImageController,
   ],
   providers: [
     DiscountService,
