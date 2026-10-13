@@ -18,7 +18,11 @@ const SHIFT_REQUEST_ALIASES = [
   ['movement_type', 'movementType'],
   ['performed_by', 'performedBy'],
   ['closing_cash_actual', 'closingCashActual'],
+  ['opened_by_employee_id', 'openedByEmployeeId'],
+  ['closed_by_employee_id', 'closedByEmployeeId'],
 ] as const;
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function normalizeShiftRequest<T extends object>(input: T): T {
   const request = { ...input } as T & Record<string, unknown>;
@@ -48,6 +52,8 @@ type OpenShiftRequest = ShiftDenominationData & {
   cashier_name?: string;
   openingCash?: number;
   opening_cash?: number;
+  openedByEmployeeId?: string;
+  opened_by_employee_id?: string;
 };
 
 
@@ -130,8 +136,12 @@ export class AppController {
     if (!Number.isFinite(openingCash) || openingCash < 0) {
       throw new BadRequestException('openingCash must be a non-negative number');
     }
-    if (body.registerId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(body.registerId)) {
+    if (body.registerId && !UUID_PATTERN.test(body.registerId)) {
       throw new BadRequestException('registerId must be a valid UUID');
+    }
+    const openedByEmployeeId = body.openedByEmployeeId?.trim() || undefined;
+    if (openedByEmployeeId && !UUID_PATTERN.test(openedByEmployeeId)) {
+      throw new BadRequestException('openedByEmployeeId must be a valid UUID');
     }
     if (body.drawer_denominations !== undefined && (
       !Array.isArray(body.drawer_denominations) ||
@@ -178,6 +188,7 @@ export class AppController {
         tube_total_amount: body.tube_total_amount,
         total_amount: body.total_amount,
       },
+      openedByEmployeeId,
     );
     return {
       success: true,
@@ -220,12 +231,18 @@ export class AppController {
     shift_id?: string;
     closingCashActual?: number;
     closing_cash_actual?: number;
+    closedByEmployeeId?: string;
+    closed_by_employee_id?: string;
   }) {
     const body = normalizeShiftRequest(request);
     if (!body.shiftId || body.closingCashActual === undefined) {
       throw new BadRequestException('shiftId and closingCashActual are required');
     }
-    const result = await this.posRepository.closeShift(body.shiftId, Number(body.closingCashActual));
+    const closedByEmployeeId = body.closedByEmployeeId?.trim() || undefined;
+    if (closedByEmployeeId && !UUID_PATTERN.test(closedByEmployeeId)) {
+      throw new BadRequestException('closedByEmployeeId must be a valid UUID');
+    }
+    const result = await this.posRepository.closeShift(body.shiftId, Number(body.closingCashActual), closedByEmployeeId);
     if (!result.success) {
       throw new NotFoundException(result.message);
     }
@@ -244,8 +261,8 @@ export class AppController {
     return {
       success: true,
       storeId: storeId || 'STR-5001',
+      count: shifts.length,
       shifts,
-      shift: shifts[0] ?? null,
     };
   }
 
@@ -255,7 +272,7 @@ export class AppController {
     @Query() query: { storeId?: string; store_id?: string },
   ) {
     const id = employeeId.trim();
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    if (!UUID_PATTERN.test(id)) {
       throw new BadRequestException('employeeId must be a valid UUID');
     }
     const { storeId } = normalizeShiftRequest(query);
