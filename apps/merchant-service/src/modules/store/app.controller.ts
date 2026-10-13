@@ -488,7 +488,55 @@ export class AppController {
   ) {
     const store = await this.merchantRepository.getStoreById(storeId);
     if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
-    return this.merchantRepository.getStoreProductVariations(store.id, productId);
+    const variations = await this.merchantRepository.getStoreProductVariations(store.id, productId);
+    if (!Array.isArray(variations) || variations.length === 0) return variations;
+
+    const variationIds = variations
+      .map((variation) =>
+        variation && typeof variation === 'object'
+          ? String((variation as Record<string, unknown>).id ?? '')
+          : '',
+      )
+      .filter((id) => /^\d+$/.test(id));
+    if (variationIds.length === 0) return variations;
+
+    const imageRows: Array<{ variation_id: string; image: unknown }> =
+      await this.merchantRepository.requireDataSource().query(
+        `
+        SELECT product.item->>'id' AS variation_id,
+               product.item->'image' AS image
+        FROM public.store_products AS catalog
+        CROSS JOIN LATERAL jsonb_array_elements(
+          CASE
+            WHEN jsonb_typeof(catalog.payload) = 'array' THEN catalog.payload
+            ELSE '[]'::jsonb
+          END
+        ) AS product(item)
+        WHERE catalog.store_id = $1::uuid
+          AND COALESCE(catalog.is_deleted, false) = false
+          AND product.item->>'id' = ANY($2::text[])
+        `,
+        [store.id, variationIds],
+      );
+    const imagesByVariationId = new Map(
+      imageRows.map((row) => [String(row.variation_id), row.image]),
+    );
+
+    return variations.map((variation) => {
+      if (!variation || typeof variation !== 'object' || Array.isArray(variation)) return variation;
+      const record = variation as Record<string, unknown>;
+      const existingImages = Array.isArray(record.images) ? record.images : [];
+      const storedImage = imagesByVariationId.get(String(record.id ?? ''));
+      const image = storedImage ?? record.image ?? existingImages[0] ?? null;
+      const images = image === null
+        ? []
+        : [image && typeof image === 'object' ? image : { src: image }];
+      return {
+        ...record,
+        image,
+        images,
+      };
+    });
   }
 
   @Get('store/:storeId/store-categories/:categoryId/products')

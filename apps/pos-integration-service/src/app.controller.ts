@@ -248,4 +248,14 @@ export class AppController {
       shift: shifts[0] ?? null,
     };
   }
+
+  @Get('stores/:store_id/shifts/:shift_id')
+  async getShift(
+    @Param('store_id') store_id: string,
+    @Param('shift_id') shift_id: string,
+  ) {
+    const shift = await this.posRepository.getShiftWithSafeTransactions(shift_id, store_id);
+    if (!shift) throw new NotFoundException('POS shift not found');
+    return { success: true, shift };
+  }
 }

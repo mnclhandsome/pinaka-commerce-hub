@@ -24,7 +24,7 @@ import { FastkeyService, UploadedBinary } from './fastkey.service';
 type AuthenticatedRequest = {
   protocol?: string;
   headers?: Record<string, string | string[] | undefined>;
-  user?: { id?: string };
+  user?: { id?: string; storeId?: string };
   get(name: string): string | undefined;
 };
 
@@ -81,6 +81,18 @@ export class FastkeyController {
       this.requestOrigin(request),
       file,
     );
+    const origin = this.requestOrigin(request);
+    let imagePath: string | undefined;
+    try {
+      if (file) {
+        imagePath = await this.saveImage(file);
+        dto.fastkey_image = `${origin}${imagePath}`;
+      }
+      return await this.service.create(dto, request.user?.id, origin, request.user?.storeId);
+    } catch (error) {
+      if (imagePath) await this.removeImage(imagePath);
+      throw error;
+    }
   }
 
   @Post(['update-fastkey', 'update', 'update-fastkeys'])
@@ -107,6 +119,7 @@ export class FastkeyController {
     return this.service.getByUser(
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 
@@ -129,6 +142,7 @@ export class FastkeyController {
       fastkeyId,
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 
@@ -138,7 +152,7 @@ export class FastkeyController {
     @Param('fastkey_id') fastkeyId: string | undefined,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.service.delete(fastkeyId, request.user?.id);
+    return this.service.delete(fastkeyId, request.user?.id, request.user?.storeId);
   }
 
   @Post(['delete-product', 'delete_product'])
@@ -148,7 +162,7 @@ export class FastkeyController {
     @Body() dto: DeleteFastkeyProductDto,
     @Req() request: AuthenticatedRequest,
   ) {
-    return this.service.deleteProduct(dto, request.user?.id);
+    return this.service.deleteProduct(dto, request.user?.id, request.user?.storeId);
   }
 
   @Post(['add-products', 'add_products', 'fastkeys/add-products'])
@@ -162,6 +176,7 @@ export class FastkeyController {
       dto,
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 
@@ -180,6 +195,7 @@ export class FastkeyController {
       dto,
       request.user?.id,
       this.requestOrigin(request),
+      request.user?.storeId,
     );
   }
 

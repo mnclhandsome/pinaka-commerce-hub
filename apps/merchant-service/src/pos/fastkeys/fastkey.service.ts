@@ -126,10 +126,10 @@ export class FastkeyService {
     }
   }
 
-  async getByUser(userId: string | undefined, origin: string) {
+  async getByUser(userId: string | undefined, origin: string, storeId?: string) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
 
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const rows = await this.merchants
       .requireDataSource()
       .getRepository(StoreEmployeeFastkeyEntity)
@@ -222,6 +222,7 @@ export class FastkeyService {
     fastkeyId: string | undefined,
     userId: string | undefined,
     origin: string,
+    storeId?: string,
   ) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
 
@@ -233,7 +234,7 @@ export class FastkeyService {
       );
     }
 
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const repository = this.merchants
       .requireDataSource()
       .getRepository(StoreEmployeeFastkeyEntity);
@@ -276,7 +277,7 @@ export class FastkeyService {
     };
   }
 
-  async delete(fastkeyId: string | undefined, userId: string | undefined) {
+  async delete(fastkeyId: string | undefined, userId: string | undefined, storeId?: string) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
 
     const id = String(fastkeyId ?? '').trim();
@@ -287,7 +288,7 @@ export class FastkeyService {
       );
     }
 
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const repository = this.merchants
       .requireDataSource()
       .getRepository(StoreEmployeeFastkeyEntity);
@@ -328,6 +329,7 @@ export class FastkeyService {
   async deleteProduct(
     dto: DeleteFastkeyProductDto,
     userId: string | undefined,
+    storeId?: string,
   ) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
 
@@ -343,7 +345,7 @@ export class FastkeyService {
       );
     }
 
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const repository = this.merchants
       .requireDataSource()
       .getRepository(StoreEmployeeFastkeyEntity);
@@ -396,7 +398,7 @@ export class FastkeyService {
     }
 
     const db = this.merchants.requireDataSource();
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const repository = db.getRepository(StoreEmployeeFastkeyEntity);
     const fastkey = await repository.findOne({
       where: { id: dto.fastkey_id, isDeleted: false },
@@ -521,6 +523,7 @@ export class FastkeyService {
     dto: AddFastkeyProductsDto,
     userId: string | undefined,
     origin: string,
+    storeId?: string,
   ) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
     if (
@@ -537,7 +540,7 @@ export class FastkeyService {
     const requestedProducts = dto.products;
 
     const db = this.merchants.requireDataSource();
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const fastkeyRepository = db.getRepository(StoreEmployeeFastkeyEntity);
     const fastkey = await fastkeyRepository.findOne({
       where: {
@@ -616,6 +619,7 @@ export class FastkeyService {
     dto: AddFastkeyProductsDto,
     userId: string | undefined,
     origin: string,
+    storeId?: string,
   ) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
     if (
@@ -630,7 +634,7 @@ export class FastkeyService {
     }
 
     const db = this.merchants.requireDataSource();
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const fastkeyRepository = db.getRepository(StoreEmployeeFastkeyEntity);
     const fastkey = await fastkeyRepository.findOne({
       where: {
@@ -695,25 +699,36 @@ export class FastkeyService {
     };
   }
 
-  private async resolveContext(): Promise<FastkeyContext> {
+  private async resolveContext(
+    userId: string,
+    storeId?: string,
+  ): Promise<FastkeyContext> {
+    if (!storeId) {
+      throw new UnauthorizedException(
+        'A POS employee access token with store context is required',
+      );
+    }
     const db = this.merchants.requireDataSource();
-    const [employee] = await db.getRepository(EmployeeEntity).find({
-      order: { createdAt: 'ASC' },
-      select: { id: true },
-      take: 1,
-    });
-    if (!employee) {
-      throw new ForbiddenException('No employee record is available');
+    const rows = await db.query(
+      `SELECT e.id::text AS employee_id, es.store_id::text AS store_id
+       FROM public.employees e
+       JOIN public.employee_stores es ON es.employee_id = e.id
+       JOIN public.stores s ON s.id = es.store_id
+       WHERE e.id::text = $1
+         AND es.store_id::text = $2
+         AND (e.status IS NULL OR UPPER(e.status::text) <> 'INACTIVE')
+         AND (es.status IS NULL OR UPPER(es.status::text) <> 'INACTIVE')
+         AND (s.status IS NULL OR UPPER(s.status::text) <> 'INACTIVE')
+       LIMIT 1`,
+      [userId, storeId],
+    );
+    const context = rows[0] as FastkeyContext | undefined;
+    if (!context) {
+      throw new ForbiddenException(
+        'The logged-in employee is not assigned to this store',
+      );
     }
-    const [store] = await db.getRepository(StoreEntity).find({
-      order: { createdAt: 'ASC' },
-      select: { id: true },
-      take: 1,
-    });
-    if (!store) {
-      throw new ForbiddenException('No store record is available');
-    }
-    return { employee_id: employee.id, store_id: store.id };
+    return context;
   }
 
   private toWordPressInteger(value: string | undefined): number {
