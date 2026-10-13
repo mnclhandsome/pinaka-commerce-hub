@@ -354,9 +354,9 @@ export class StorePosConfigurationsService {
     }
 
     const settings = await this.optionalRows(
-      `SELECT id, threshold, "tubeSize"
+      `SELECT id, threshold, tube_size AS "tubeSize"
        FROM public.pos_safe_drop_settings
-       WHERE "storeId" = $1
+       WHERE store_id = $1
        LIMIT 1`,
       [storeId],
     );
@@ -368,15 +368,15 @@ export class StorePosConfigurationsService {
       this.optionalRows(
         `SELECT id, amount AS denom, "imageName" AS "imageName", "imageData" AS image
          FROM public.pos_safe_drop_denominations
-         WHERE "safeDropId" = $1::uuid
-         ORDER BY "sortOrder" ASC, amount ASC`,
+         WHERE safe_drop_id = $1::uuid
+         ORDER BY sort_order ASC, amount ASC`,
         [setting.id],
       ),
       this.optionalRows(
         `SELECT amount AS denom, quantity AS tube_limit
          FROM public.pos_safe_drop_tubes
-         WHERE "safeDropId" = $1::uuid
-         ORDER BY "sortOrder" ASC, amount ASC`,
+         WHERE safe_drop_id = $1::uuid
+         ORDER BY sort_order ASC, amount ASC`,
         [setting.id],
       ),
     ]);

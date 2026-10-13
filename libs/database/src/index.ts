@@ -1000,6 +1000,7 @@ async function ensureLegacyQueryColumns(dataSource: DataSource): Promise<void> {
 
 function columnDefaultSql(column: {
   default?: unknown;
+  type?: unknown;
   isCreateDate?: boolean;
   isUpdateDate?: boolean;
   isGenerated?: boolean;
@@ -1016,6 +1017,10 @@ function columnDefaultSql(column: {
     }
   }
   if (value === undefined || value === null) return null;
+  const type = typeof column.type === 'string' ? column.type.toLowerCase() : '';
+  if ((type === 'json' || type === 'jsonb') && typeof value === 'object') {
+    return `'${JSON.stringify(value).replace(/'/g, "''")}'::${type}`;
+  }
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   const text = String(value).trim();
   if (!text) return `''`;

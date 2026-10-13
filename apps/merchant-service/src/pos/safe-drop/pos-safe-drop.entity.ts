@@ -13,19 +13,19 @@ export class PosSafeDropEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  @Column({ type: 'varchar', length: 100 })
+  @Column({ name: 'store_id', type: 'varchar', length: 100 })
   storeId!: string;
 
-  @Column({ type: 'varchar', length: 100 })
+  @Column({ name: 'merchant_id', type: 'varchar', length: 100 })
   merchantId!: string;
 
   @Column({ type: 'boolean', default: true })
   enabled!: boolean;
 
-  @Column({ type: 'varchar', length: 100, default: '' })
+  @Column({ name: 'primary_safe', type: 'varchar', length: 100, default: '' })
   primarySafe!: string;
 
-  @Column({ type: 'boolean', default: false })
+  @Column({ name: 'drop_enabled', type: 'boolean', default: false })
   dropEnabled!: boolean;
 
   @Column({ type: 'numeric', precision: 12, scale: 2, nullable: true })
@@ -37,21 +37,21 @@ export class PosSafeDropEntity {
   @Column({ type: 'numeric', precision: 12, scale: 2, nullable: true })
   maximum!: string | null;
 
-  @Column({ type: 'boolean', default: true })
+  @Column({ name: 'manager_approval', type: 'boolean', default: true })
   managerApproval!: boolean;
 
-  @Column({ type: 'boolean', default: true })
+  @Column({ name: 'cashier_initiated', type: 'boolean', default: true })
   cashierInitiated!: boolean;
 
-  @Column({ type: 'boolean', default: true })
+  @Column({ name: 'reason_required', type: 'boolean', default: true })
   reasonRequired!: boolean;
 
-  @Column({ type: 'integer', nullable: true })
+  @Column({ name: 'tube_size', type: 'integer', nullable: true })
   tubeSize!: number | null;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ name: 'created_at' })
   createdAt!: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ name: 'updated_at' })
   updatedAt!: Date;
 }

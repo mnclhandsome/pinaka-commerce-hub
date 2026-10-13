@@ -13,24 +13,24 @@ export class PosSafeDropDenominationEntity {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ name: 'safe_drop_id', type: 'uuid' })
   safeDropId!: string;
 
   @Column({ type: 'numeric', precision: 12, scale: 2 })
   amount!: string;
 
-  @Column({ type: 'varchar', length: 255 })
+  @Column({ name: 'image_name', type: 'varchar', length: 255 })
   imageName!: string;
 
-  @Column({ type: 'text' })
+  @Column({ name: 'image_data', type: 'text' })
   imageData!: string;
 
-  @Column({ type: 'integer', default: 0 })
+  @Column({ name: 'sort_order', type: 'integer', default: 0 })
   sortOrder!: number;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ name: 'created_at' })
   createdAt!: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ name: 'updated_at' })
   updatedAt!: Date;
 }

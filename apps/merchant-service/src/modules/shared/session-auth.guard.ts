@@ -36,6 +36,9 @@ export class SessionAuthGuard implements CanActivate {
             accountId: payload.accountId,
             email: payload.email,
             role: payload.role,
+            merchantId: payload.merchantId,
+            storeId: payload.storeId,
+            deviceId: payload.deviceId,
             sessionId: payload.jti,
           };
         } catch {
@@ -53,12 +56,21 @@ export class SessionAuthGuard implements CanActivate {
     const payload = verifyAccessToken(token);
     const session = await this.merchants.touchSession(payload.jti!, token);
     if (!session) throw new UnauthorizedException('Session is not active. Please log in again.');
+    const scopedPayload = payload as typeof payload & {
+      merchantId?: string;
+      storeId?: string;
+    };
     request.user = {
       id: payload.sub,
       accountId: payload.accountId ?? session.accountId,
       email: payload.email ?? session.email,
       role: payload.role ?? session.role,
+      merchantId: payload.merchantId,
+      storeId: payload.storeId,
+      deviceId: payload.deviceId,
       sessionId: session.id,
+      merchantId: scopedPayload.merchantId ?? session.merchantId,
+      storeId: scopedPayload.storeId ?? session.storeId,
     };
     return true;
   }

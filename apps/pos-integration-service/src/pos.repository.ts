@@ -195,6 +195,7 @@ export class PosRepository implements OnModuleInit {
     ], { synchronize: false });
     await createMissingTables(this.dataSource);
     await ensurePosShiftSnakeCaseSchema(this.dataSource);
+    await this.ensureSafeTransactionShiftConstraints();
     this.shiftRepo = this.dataSource.getRepository(PosShiftEntity);
     this.movementRepo = this.dataSource.getRepository(CashMovementEntity);
     this.isDbConnected = true;
@@ -213,6 +214,25 @@ export class PosRepository implements OnModuleInit {
       console.log(`⚠️ [POS Integration Redis] Offline (${err.message}).`);
       this.isRedisConnected = false;
     }
+  }
+
+  private async ensureSafeTransactionShiftConstraints() {
+    await this.dataSource?.query(`
+      DO $$ BEGIN
+        IF to_regclass('public.pos_safe_transactions') IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'pos_safe_transactions_shift_fk'
+        ) THEN
+          ALTER TABLE public.pos_safe_transactions ADD CONSTRAINT pos_safe_transactions_shift_fk
+            FOREIGN KEY (shift_id) REFERENCES public.pos_shifts(id) ON DELETE RESTRICT;
+        END IF;
+        IF to_regclass('public.pos_safe_drop_transactions') IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'pos_safe_drop_transactions_shift_fk'
+        ) THEN
+          ALTER TABLE public.pos_safe_drop_transactions ADD CONSTRAINT pos_safe_drop_transactions_shift_fk
+            FOREIGN KEY (shift_id) REFERENCES public.pos_shifts(id) ON DELETE RESTRICT;
+        END IF;
+      END $$;
+    `);
   }
 
   // --- Open Cashier Shift ---
@@ -336,6 +356,57 @@ export class PosRepository implements OnModuleInit {
     return this.inMemoryShifts
       .filter((shift) => shift.storeId === storeId && shift.status === ShiftStatus.OPEN)
       .sort((left, right) => right.openedAt.getTime() - left.openedAt.getTime());
+  }
+
+  async getShiftWithSafeTransactions(shiftId: string, storeId: string) {
+    const shift = await this.shiftRepo?.findOne({ where: { id: shiftId, storeId } });
+    if (!shift) return null;
+    const safes = await this.dataSource!.query(
+      `SELECT id AS safe_id, title, created_at, safe_data, shift_id, created_by
+       FROM public.pos_safe_transactions WHERE shift_id = $1 AND store_id = $2 ORDER BY created_at DESC, id DESC`,
+      [shiftId, storeId],
+    );
+    const safe_drops = await this.dataSource!.query(
+      `SELECT id AS safe_drop_id, title, created_at, safe_data, shift_id, created_by
+       FROM public.pos_safe_drop_transactions WHERE shift_id = $1 AND store_id = $2 ORDER BY created_at DESC, id DESC`,
+      [shiftId, storeId],
+    );
+    return {
+      id: shift.id,
+      merchant_id: shift.merchantId,
+      store_id: shift.storeId,
+      register_id: shift.registerId,
+      device_id: shift.terminalId,
+      opening_device_id: shift.openingDeviceId,
+      opened_by_employee_id: shift.openedByEmployeeId,
+      closed_by_employee_id: shift.closedByEmployeeId,
+      shift_number: shift.shiftNumber,
+      cashier_name: shift.cashierName,
+      opening_cash: shift.openingCash,
+      total_cash_sales: shift.totalCashSales,
+      total_card_sales: shift.totalCardSales,
+      total_safe_drops: shift.totalSafeDrops,
+      total_paid_outs: shift.totalPaidOuts,
+      drawer_denominations: shift.drawer_denominations,
+      drawer_total_amount: shift.drawer_total_amount,
+      tube_denominations: shift.tube_denominations,
+      tube_total_amount: shift.tube_total_amount,
+      total_amount: shift.total_amount,
+      closing_cash_actual: shift.closingCashActual,
+      expected_cash_in_drawer: shift.expectedCashInDrawer,
+      declared_cash: shift.declaredCash,
+      cash_difference: shift.cashDifference,
+      discrepancy: shift.discrepancy,
+      opening_note: shift.openingNote,
+      closing_note: shift.closingNote,
+      status: shift.status,
+      opened_at: shift.openedAt,
+      closed_at: shift.closedAt,
+      created_at: shift.createdAt,
+      updated_at: shift.updatedAt,
+      safes,
+      safe_drops,
+    };
   }
 
   private async cacheActiveShift(storeId: string, shift: PosShiftEntity) {
