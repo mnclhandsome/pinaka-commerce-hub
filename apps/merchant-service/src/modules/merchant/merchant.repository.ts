@@ -1488,8 +1488,8 @@ export class MerchantRepository implements OnModuleInit {
     serialNumber: string;
     status?: string;
     createdAt?: Date;
-    createdBy: string;
-    updatedBy: string;
+    createdBy?: string;
+    updatedBy?: string;
   }): Promise<DeviceEntity> {
     if (!this.deviceRepo) {
       throw new ServiceUnavailableException('Database not connected');

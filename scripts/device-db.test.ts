@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 import { DeviceEntity } from '../apps/merchant-service/src/entities/device.entity';
-import { MerchantRepository } from '../apps/merchant-service/src/merchant.repository';
+import { MerchantRepository } from '../apps/merchant-service/src/modules/merchant/merchant.repository';
 
 async function main() {
   const db = new DataSource({ type: 'postgres', url: process.env.DATABASE_URL || undefined,
