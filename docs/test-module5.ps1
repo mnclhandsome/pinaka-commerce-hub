@@ -101,8 +101,10 @@ Write-Host "`n5. Testing GET $baseUrl/shifts/active?storeId=$storeId..." -Foregr
 try {
     $activeShift = Invoke-RestMethod -Uri "$baseUrl/shifts/active?storeId=$storeId" -Method Get
     Write-Host "[SUCCESS] Active Shift Verified!" -ForegroundColor Green
-    Write-Host "   Active Shift ID:" $activeShift.shift.id -ForegroundColor Cyan
-    Write-Host "   Total Safe Drops:" $activeShift.shift.totalSafeDrops -ForegroundColor Yellow
+    Write-Host "   Active Shifts:" $activeShift.count -ForegroundColor Cyan
+    foreach ($s in $activeShift.shifts) {
+        Write-Host "   Shift ID:" $s.id "| Total Safe Drops:" $s.totalSafeDrops -ForegroundColor Yellow
+    }
 } catch {
     Write-Host "[ERROR] Active shift check failed" -ForegroundColor Red
 }

@@ -244,12 +244,14 @@ export class PosRepository implements OnModuleInit {
     openingCash: number,
     registerId?: string,
     denominationData: ShiftDenominationData = {},
+    openedByEmployeeId?: string,
   ): Promise<PosShiftEntity> {
     const shift: PosShiftEntity = {
       id: `SHIFT-${randomUUID()}`,
       merchantId,
       storeId,
       registerId,
+      openedByEmployeeId,
       terminalId: terminalId || 'SUNMI-D3-01',
       cashierName: cashierName || 'Cashier',
       openingCash: Number(openingCash),
@@ -313,7 +315,7 @@ export class PosRepository implements OnModuleInit {
   }
 
   // --- Close Shift & Generate Z-Report ---
-  async closeShift(shiftId: string, closingCashActual: number): Promise<{ success: boolean; shift?: PosShiftEntity; message?: string }> {
+  async closeShift(shiftId: string, closingCashActual: number, closedByEmployeeId?: string): Promise<{ success: boolean; shift?: PosShiftEntity; message?: string }> {
     let shift: PosShiftEntity | null = null;
 
     if (this.isDbConnected && this.shiftRepo) {
@@ -325,6 +327,7 @@ export class PosRepository implements OnModuleInit {
         shift.discrepancy = Number(closingCashActual) - expected;
         shift.status = ShiftStatus.CLOSED;
         shift.closedAt = new Date();
+        if (closedByEmployeeId) shift.closedByEmployeeId = closedByEmployeeId;
         shift = await this.shiftRepo.save(shift);
       }
     } else {
@@ -336,6 +339,7 @@ export class PosRepository implements OnModuleInit {
         shift.discrepancy = Number(closingCashActual) - expected;
         shift.status = ShiftStatus.CLOSED;
         shift.closedAt = new Date();
+        if (closedByEmployeeId) shift.closedByEmployeeId = closedByEmployeeId;
       }
     }
 
@@ -375,13 +379,13 @@ export class PosRepository implements OnModuleInit {
     if (!shift) return null;
     const safes = await this.dataSource!.query(
       `SELECT id AS safe_id, title, created_at, safe_data, shift_id, created_by
-       FROM public.pos_safe_transactions WHERE shift_id = $1 AND store_id = $2 ORDER BY created_at DESC, id DESC`,
-      [shiftId, storeId],
+       FROM public.pos_safe_transactions WHERE shift_id = $1 ORDER BY created_at DESC, id DESC`,
+      [shiftId],
     );
     const safe_drops = await this.dataSource!.query(
       `SELECT id AS safe_drop_id, title, created_at, safe_data, shift_id, created_by
-       FROM public.pos_safe_drop_transactions WHERE shift_id = $1 AND store_id = $2 ORDER BY created_at DESC, id DESC`,
-      [shiftId, storeId],
+       FROM public.pos_safe_drop_transactions WHERE shift_id = $1 ORDER BY created_at DESC, id DESC`,
+      [shiftId],
     );
     return {
       id: shift.id,
