@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { DynamicQueryModule } from './modules/dynamic-query/dynamic-query.module';
 import { EmployeeModule } from './modules/employee/employee.module';
-import { FileStorageModule } from './modules/file-storage/file-storage.module';
 import { MasterModule } from './modules/master/master.module';
 import { MerchantModule } from './modules/merchant/merchant.module';
 import { PosModule } from './pos/pos.module';
@@ -17,7 +16,6 @@ import { PosAuthModule } from './modules/pos-auth/pos-auth.module';
  */
 @Module({
   imports: [
-    FileStorageModule,
     MerchantModule,
     StoreModule,
     EmployeeModule,
