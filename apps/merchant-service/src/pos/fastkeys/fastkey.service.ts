@@ -10,7 +10,6 @@ import { readdir } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { MerchantRepository } from '../../modules/merchant/merchant.repository';
 import { FileStorageService } from '../../modules/file-storage/file-storage.service';
-import { EmployeeEntity } from '../../entities/employee.entity';
 import { MerchantEntity } from '../../entities/merchant.entity';
 import { StoreEntity } from '../../entities/store.entity';
 import {
@@ -45,6 +44,7 @@ export class FastkeyService {
     userId: string | undefined,
     origin: string,
     file?: UploadedBinary,
+    storeId?: string,
   ) {
     const title = String(dto.fastkey_title ?? '').trim();
     if (!title) {
@@ -55,7 +55,7 @@ export class FastkeyService {
 
     const fastkeyIndex = this.toWordPressInteger(dto.fastkey_index);
     const db = this.merchants.requireDataSource();
-    const context = await this.resolveContext();
+    const context = await this.resolveContext(userId, storeId);
     const fallback =
       process.env.FASTKEY_DEFAULT_IMAGE_URL?.trim() ||
       `${origin}/uploads/fastkeys/no-image-2.png`;
@@ -434,6 +434,7 @@ export class FastkeyService {
     userId: string | undefined,
     origin: string,
     file?: UploadedBinary,
+    storeId?: string,
   ) {
     if (!userId) throw new UnauthorizedException('Authentication is required');
     if (!dto.fastkey_id) {
