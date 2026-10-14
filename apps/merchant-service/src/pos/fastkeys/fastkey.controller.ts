@@ -6,6 +6,7 @@ import {
   HttpCode,
   Inject,
   Param,
+  ParseUUIDPipe,
   Post,
   Req,
   UploadedFile,
@@ -129,6 +130,15 @@ export class FastkeyController {
       request.user?.id,
       this.requestOrigin(request),
     );
+  }
+
+  @Get('get-by-store-id/:store_id')
+  @RequireAuth()
+  getByStoreId(
+    @Param('store_id', new ParseUUIDPipe()) storeId: string,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    return this.service.getByStore(storeId, request.user?.id, this.requestOrigin(request));
   }
 
   @Get('get-all-fastkeys-images')
