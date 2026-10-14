@@ -11,8 +11,8 @@ import {
   NotFoundException,
   Post,
 } from '@nestjs/common';
-import { PosSessionService } from '../pos-auth/services/pos-session.service';
 import { MerchantRepository } from '../merchant/merchant.repository';
+import { PosSessionService } from '../pos-auth/services/pos-session.service';
 
 export class ActivateDeviceDto {
   activationCode?: string;
@@ -57,8 +57,9 @@ type ActivationDevice = {
 ])
 export class DeviceActivationController {
   constructor(
-    @Inject(PosSessionService) private readonly posSessionService: PosSessionService,
-    @Inject(MerchantRepository) private readonly merchantRepository: MerchantRepository,
+    @Inject(PosSessionService)
+    private readonly posSessionService: PosSessionService,
+    @Inject(MerchantRepository) private readonly merchants: MerchantRepository,
   ) {}
 
   @Public()
@@ -239,6 +240,8 @@ export class DeviceActivationController {
       deviceId: device.id || device.deviceCode,
       registerId: 'REG-01',
       roleId: 'ROLE001',
+      roleCode: 'CASHIER',
+      roleName: 'Cashier',
     });
     const storeUrl =
       store.storeWebsiteUrl ||
@@ -297,10 +300,10 @@ export class DeviceActivationController {
       'SUNMI-D3-ABC123';
     const serialStr = String(serial).trim();
     try {
-      const dataSource = this.merchantRepository.requireDataSource();
-      await dataSource.query(
-        `UPDATE public.devices SET "serial_number" = 'SN-UNASSIGNED' WHERE "serial_number" = $1 OR "device_active_code" = 'PK-823914'`,
-        [serialStr],
+      const dataSource = this.merchants.requireDataSource();
+    await dataSource.query(
+      `UPDATE public.devices SET "serial_number" = 'SN-UNASSIGNED' WHERE "serial_number" = $1 OR "device_active_code" = 'PK-823914'`,
+      [serialStr],
       );
     } catch (err) {}
     return {
