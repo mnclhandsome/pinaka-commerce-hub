@@ -967,6 +967,13 @@ async function ensureLegacyQueryColumns(dataSource: DataSource): Promise<void> {
     ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "merchantName" varchar(255);
     ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "merchantId" varchar(100);
     ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "createdAt" timestamptz;
+    ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS notes text;
+    ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS device_id text;
+    ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS authorization_code varchar(100);
+    ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS device_active_code varchar(100);
+    ALTER TABLE public.devices ALTER COLUMN serial_number DROP NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS devices_authorization_code_uidx ON public.devices (authorization_code) WHERE authorization_code IS NOT NULL AND authorization_code <> '';
+    CREATE UNIQUE INDEX IF NOT EXISTS devices_device_active_code_uidx ON public.devices (device_active_code) WHERE device_active_code IS NOT NULL AND device_active_code <> '';
     UPDATE public.devices SET
       "deviceCode" = device_code,
       "deviceName" = device_name,
