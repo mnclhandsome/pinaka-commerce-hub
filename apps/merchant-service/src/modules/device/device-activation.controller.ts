@@ -1,246 +1,308 @@
 import { Public } from '@pinaka-delivery-hub/auth';
 import {
-  Controller,
-  Post,
+  BadRequestException,
   Body,
+  ConflictException,
+  Controller,
+  ForbiddenException,
   HttpCode,
   HttpStatus,
-  BadRequestException,
-  ForbiddenException,
-  NotFoundException,
   Inject,
+  NotFoundException,
+  Post,
 } from '@nestjs/common';
 import { connectPostgres } from '@pinaka-delivery-hub/database';
+import { MerchantRepository } from '../merchant/merchant.repository';
 import { PosSessionService } from '../pos-auth/services/pos-session.service';
 
 export class ActivateDeviceDto {
   activationCode?: string;
-  device_serialnumber?: string;
+  activation_code?: string;
+  authorizationCode?: string;
+  authorization_code?: string;
+  authorizationcode?: string;
+  auth_code?: string;
+  code?: string;
+
+  device_Id?: string;
+  device_id?: string;
+  deviceId?: string;
+
+  serial_number?: string;
   serialNumber?: string;
+  serial?: string;
+  serial_numer?: string;
+  serial_no?: string;
+
+  device_serialnumber?: string;
+  device_serial_number?: string;
   deviceSerialNumber?: string;
   deviceIdentifier?: string;
 }
 
-const activatedSerials = new Set<string>();
+type ActivationDevice = {
+  id: string;
+  deviceCode: string;
+  deviceName: string;
+  merchantId: string;
+  serialNumber: string | null;
+  deviceId: string | null;
+  status: string;
+};
 
 @Public()
-@Controller(['api/v1/device-activation', 'connector/api/v1/device-activation', 'device-activation'])
+@Controller([
+  'api/v1/device-activation',
+  'connector/api/v1/device-activation',
+  'device-activation',
+])
 export class DeviceActivationController {
   constructor(
-    @Inject(PosSessionService) private readonly posSessionService: PosSessionService,
+    @Inject(PosSessionService)
+    private readonly posSessionService: PosSessionService,
+    @Inject(MerchantRepository) private readonly merchants: MerchantRepository,
   ) {}
 
   @Public()
   @Post(['activate', 'active'])
   @HttpCode(HttpStatus.OK)
   async activate(@Body() body: ActivateDeviceDto) {
-    const activationCode = body.activationCode ? String(body.activationCode).trim() : '';
-    const rawSerial = body.device_serialnumber || body.serialNumber || body.deviceSerialNumber || body.deviceIdentifier || 'SUNMI-D3-ABC123';
-    const serialNumber = String(rawSerial).trim();
+    const rawCode =
+      body?.activationCode ||
+      body?.activation_code ||
+      body?.authorizationCode ||
+      body?.authorization_code ||
+      body?.authorizationcode ||
+      body?.auth_code ||
+      body?.code;
+    const activationCode = rawCode ? String(rawCode).trim() : '';
+
+    const rawSerialNumber =
+      body?.serial_number ||
+      body?.serialNumber ||
+      body?.serial ||
+      body?.serial_numer ||
+      body?.serial_no ||
+      body?.device_serialnumber ||
+      body?.device_serial_number ||
+      body?.deviceSerialNumber;
+    const serialNumber = rawSerialNumber ? String(rawSerialNumber).trim() : '';
+
+    const rawDeviceId =
+      body?.device_id ||
+      body?.device_Id ||
+      body?.deviceId ||
+      body?.deviceIdentifier;
+    const explicitDeviceId = rawDeviceId ? String(rawDeviceId).trim() : '';
+
+    // Serial number is inserted into device table serial_number and device_id columns
+    const targetSerialNumber = serialNumber || explicitDeviceId;
+    const targetDeviceId = explicitDeviceId || serialNumber;
 
     if (!activationCode) {
-      throw new BadRequestException('Activation code is required');
+      throw new BadRequestException('Activation/Authorization code is required');
+    }
+    if (!targetSerialNumber) {
+      throw new BadRequestException('Serial number (or device ID) is required');
     }
 
+    let device: ActivationDevice;
+    let alreadyActive: boolean;
+    let merchant: any;
+    let store: any;
     try {
-      const dataSource = await connectPostgres('Device Activation', []);
-
-      // Auto-migrate column if missing
-      await dataSource.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "device_active_code" VARCHAR(100);`);
-
-      // Seed / ensure test device for 'PK-823914' exists
-      if (activationCode === 'PK-823914') {
-        const checkSeed = await dataSource.query(
-          `SELECT id FROM public.devices WHERE "device_active_code" = 'PK-823914' LIMIT 1`
-        );
-        if (checkSeed.length === 0) {
-          const firstDevice = await dataSource.query(`SELECT id FROM public.devices LIMIT 1`);
-          if (firstDevice[0]?.id) {
-            await dataSource.query(`UPDATE public.devices SET "device_active_code" = 'PK-823914' WHERE id::text = $1`, [firstDevice[0].id]);
-          } else {
-            await dataSource.query(
-              `INSERT INTO public.devices (id, "device_code", "merchant_id", "merchant_name", "serial_number", "device_name", "device_type", "device_active_code", status, created_at, updated_at)
-               VALUES ('DEV-99881', 'DEV-99881', '11111111-1111-1111-1111-111111111111', 'North Branch Merchant', 'SN-UNASSIGNED', 'SUNMI POS Terminal', 'POS Terminal', 'PK-823914', 'ACTIVE', NOW(), NOW())
-               ON CONFLICT DO NOTHING;`
+      const result = await this.merchants
+        .requireDataSource()
+        .transaction(async (manager) => {
+          const [found] = await manager.query(
+            `SELECT id, device_code AS "deviceCode", device_name AS "deviceName",
+                  merchant_id AS "merchantId", serial_number AS "serialNumber",
+                  device_id AS "deviceId", status
+           FROM public.devices
+           WHERE (device_active_code = $1 OR authorization_code = $1)
+           ORDER BY is_deleted ASC, created_at DESC
+           LIMIT 1
+           FOR UPDATE`,
+            [activationCode],
+          );
+          if (!found) {
+            throw new BadRequestException(
+              'Activation code does not match. Please check your activation code and try again.',
             );
           }
-        }
+
+          const status = String(found.status || '').toUpperCase();
+          if (status !== 'ACTIVE' && status !== 'PENDING_ACTIVATION') {
+            throw new ForbiddenException(
+              'Device is in inactive status. Please contact merchant to activate device.',
+            );
+          }
+
+          const [associatedMerchant] = await manager.query(
+            `SELECT id, "merchantCode", business_display_name AS "businessDisplayName",
+                  first_name AS "firstName", last_name AS "lastName", email, phone, status
+            FROM public.merchants
+            WHERE id::text = $1
+            LIMIT 1`,
+            [String(found.merchantId)],
+          );
+          if (!associatedMerchant) {
+            throw new NotFoundException('Merchant not found for device');
+          }
+
+          let [associatedStore] = await manager.query(
+            `SELECT s.id, s.store_code AS "storeCode", s.store_name AS "storeName",
+                    s.store_website_url AS "storeWebsiteUrl", s.status
+             FROM public.store_devices sd
+             JOIN public.stores s ON s.id::text = sd.store_id::text
+             WHERE sd.device_id::text = $1::text AND sd.is_deleted = false AND s.status = 'ACTIVE'
+             LIMIT 1`,
+            [String(found.id)],
+          );
+          if (!associatedStore) {
+            [associatedStore] = await manager.query(
+              `SELECT id, store_code AS "storeCode", store_name AS "storeName",
+                    store_website_url AS "storeWebsiteUrl", status
+             FROM public.stores
+             WHERE merchant_id::text = $1 AND status = 'ACTIVE'
+             ORDER BY created_at ASC
+             LIMIT 1`,
+              [String(associatedMerchant.id)],
+            );
+          }
+          if (!associatedStore) {
+            throw new NotFoundException('No active store found for merchant');
+          }
+
+          const deviceIdMatches = Boolean(found.deviceId && found.deviceId === targetDeviceId);
+          const serialNumberMatches = Boolean(found.serialNumber && found.serialNumber === targetSerialNumber);
+          const isAlreadyActive = Boolean(
+            (deviceIdMatches || serialNumberMatches) &&
+              found.status === 'ACTIVE'
+          );
+          const hasDifferentDeviceId = Boolean(
+            found.deviceId &&
+              !deviceIdMatches &&
+              found.deviceId !== found.deviceCode &&
+              found.deviceId !== ''
+          );
+          const hasDifferentSerialNumber = Boolean(
+            found.serialNumber &&
+              !serialNumberMatches &&
+              found.serialNumber !== ''
+          );
+          if (hasDifferentDeviceId || hasDifferentSerialNumber) {
+            throw new ConflictException(
+              'Activation code is already assigned to another device',
+            );
+          }
+
+          if (!deviceIdMatches || !serialNumberMatches) {
+            await manager.query(
+              `UPDATE public.devices
+               SET device_id = $1, serial_number = $2, status = 'ACTIVE', is_deleted = false, updated_at = NOW()
+               WHERE id = $3`,
+              [targetDeviceId, targetSerialNumber, found.id],
+            );
+            try {
+              await manager.query(
+                `UPDATE public.devices SET "serialNumber" = $1 WHERE id = $2`,
+                [targetSerialNumber, found.id],
+              );
+            } catch {}
+            found.deviceId = targetDeviceId;
+            found.serialNumber = targetSerialNumber;
+          }
+
+          return {
+            device: found as ActivationDevice,
+            alreadyActive: isAlreadyActive,
+            merchant: associatedMerchant,
+            store: associatedStore,
+          };
+        });
+      device = result.device;
+      alreadyActive = result.alreadyActive;
+      merchant = result.merchant;
+      store = result.store;
+    } catch (error: any) {
+      if ((error?.driverError?.code || error?.code) === '23505') {
+        throw new ConflictException(
+          'This device ID is already assigned to another device',
+        );
       }
-
-      // Step 1: Query device by activationCode or serialNumber
-      const devices = await dataSource.query(
-        `SELECT id, "device_code" AS "deviceCode", "device_name" AS "deviceName", 
-                "device_type" AS "deviceType", "merchant_id" AS "merchantId", 
-                "serial_number" AS "serialNumber", "device_active_code" AS "deviceActiveCode", status
-         FROM public.devices 
-         WHERE ("device_active_code" = $1 OR "serial_number" = $2 OR id::text = $1 OR "device_code" = $1)
-         LIMIT 1`,
-        [activationCode, serialNumber],
-      );
-
-      const device = devices[0];
-
-      // If activation code does not match any device
-      if (!device) {
-        throw new BadRequestException('Activation code does not match. Please check your activation code and try again.');
-      }
-
-      // Step 2: Check device status
-      const statusUpper = String(device.status || '').toUpperCase();
-      if (statusUpper !== 'ACTIVE') {
-        throw new ForbiddenException('Device is in inactive status. Please contact merchant to activate device.');
-      }
-
-      // Step 3: Check if already activated with the same serial number
-      if (
-        activatedSerials.has(serialNumber) ||
-        (device.serialNumber && device.serialNumber === serialNumber && device.serialNumber !== 'SN-UNASSIGNED')
-      ) {
-        throw new BadRequestException('This device is already activated');
-      }
-
-      // Step 4: Update serial number and mark as activated
-      await dataSource.query(
-        `UPDATE public.devices 
-         SET "serial_number" = $1, "status" = 'ACTIVE', "updated_at" = NOW() 
-         WHERE id::text = $2`,
-        [serialNumber, String(device.id)],
-      );
-
-      activatedSerials.add(serialNumber);
-
-      // Step 5: Fetch Merchant and Store details
-      const merchants = await dataSource.query(
-        `SELECT id, "merchantCode", "business_display_name" AS "businessDisplayName", 
-                "first_name" AS "firstName", "last_name" AS "lastName", email, phone, status 
-         FROM public.merchants 
-         WHERE (id::text = $1 OR "merchantCode" = $1)
-         LIMIT 1`,
-        [String(device.merchantId)],
-      );
-      const merchant = merchants[0] || {
-        id: device.merchantId || '11111111-1111-1111-1111-111111111111',
-        merchantCode: 'MCH-1001',
-        businessDisplayName: 'North Branch Merchant',
-        email: 'merchant@admin.pch.com',
-        phone: '+1234567890',
-        status: 'ACTIVE',
-      };
-
-      const stores = await dataSource.query(
-        `SELECT id, "store_code" AS "storeCode", "store_name" AS "storeName", 
-                "store_website_url" AS "storeWebsiteUrl", status
-         FROM public.stores 
-         WHERE (merchant_id::text = $1 OR merchant_id IN (SELECT id FROM public.merchants WHERE "merchantId" = $1 OR "merchantCode" = $1)) AND status = 'ACTIVE'
-         ORDER BY created_at ASC
-         LIMIT 1`,
-        [String(merchant.id)],
-      );
-      const store = stores[0] || {
-        id: '22222222-2222-2222-2222-222222222222',
-        storeCode: 'STORE-NORTH-01',
-        storeName: 'North Branch Store',
-        storeWebsiteUrl: 'https://north.adminmerchant.pch.com',
-      };
-
-      const session = await this.posSessionService.createSession({
-        employeeId: 'EMP-DEVICE-ACTIVATION',
-        merchantId: merchant.id,
-        storeId: store.id,
-        deviceId: device.id || device.deviceCode,
-        registerId: 'REG-01',
-        roleId: 'ROLE001',
-      });
-
-      const storeUrl = store.storeWebsiteUrl ||
-        `https://${(store.storeCode || 'store').toLowerCase()}.${(merchant.merchantCode || 'merchant').toLowerCase()}.pch.com`;
-
-      return {
-        success: true,
-        message: 'Device activated successfully',
-        data: {
-          deviceId: device.id,
-          deviceCode: device.deviceCode || 'DEV-99881',
-          deviceName: device.deviceName || 'SUNMI POS Terminal',
-          serialNumber: serialNumber,
-          activationCode: activationCode,
-          status: 'ACTIVE',
-          merchant: {
-            id: merchant.id,
-            merchantCode: merchant.merchantCode || 'MCH-1001',
-            businessDisplayName: merchant.businessDisplayName || `${merchant.firstName || ''} ${merchant.lastName || ''}`.trim() || 'Merchant Account',
-            email: merchant.email || 'merchant@admin.pch.com',
-            phone: merchant.phone || '+1234567890',
-            status: merchant.status || 'ACTIVE',
-          },
-          store: {
-            id: store.id,
-            storeCode: store.storeCode,
-            storeName: store.storeName,
-            storeWebsiteUrl: storeUrl,
-          },
-          registerId: 'REG-01',
-          deviceAccessToken: session.accessToken,
-        },
-      };
-    } catch (err: any) {
-      if (err instanceof BadRequestException || err instanceof ForbiddenException || err instanceof NotFoundException) {
-        throw err;
-      }
-      // Offline / fallback mode
-      if (activationCode !== 'PK-823914') {
-        throw new BadRequestException('Activation code does not match. Please check your activation code and try again.');
-      }
-      if (activatedSerials.has(serialNumber)) {
-        throw new BadRequestException('This device is already activated');
-      }
-      activatedSerials.add(serialNumber);
-
-      return {
-        success: true,
-        message: 'Device activated successfully',
-        data: {
-          deviceId: 'DEV-99881',
-          deviceCode: 'DEV-99881',
-          deviceName: 'SUNMI POS Terminal',
-          serialNumber: serialNumber,
-          activationCode: activationCode,
-          status: 'ACTIVE',
-          merchant: {
-            id: '11111111-1111-1111-1111-111111111111',
-            merchantCode: 'MCH-1001',
-            businessDisplayName: 'North Branch Merchant',
-            email: 'merchant@admin.pch.com',
-            phone: '+1234567890',
-            status: 'ACTIVE',
-          },
-          store: {
-            id: '22222222-2222-2222-2222-222222222222',
-            storeCode: 'STORE-NORTH-01',
-            storeName: 'North Branch Store',
-            storeWebsiteUrl: 'https://north.adminmerchant.pch.com',
-          },
-          registerId: 'REG-01',
-          deviceAccessToken: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...',
-        },
-      };
+      throw error;
     }
+
+    const session = await this.posSessionService.createSession({
+      employeeId: 'EMP-DEVICE-ACTIVATION',
+      merchantId: merchant.id,
+      storeId: store.id,
+      deviceId: device.id || device.deviceCode,
+      registerId: 'REG-01',
+      roleId: 'ROLE001',
+    });
+    const storeUrl =
+      store.storeWebsiteUrl ||
+      `https://${(store.storeCode || 'store').toLowerCase()}.${(merchant.merchantCode || 'merchant').toLowerCase()}.pch.com`;
+
+    return {
+      success: true,
+      message: alreadyActive
+        ? 'This device is already activated'
+        : 'Device activated successfully',
+      data: {
+        deviceId: device.id,
+        device_id: device.deviceId || targetDeviceId,
+        deviceCode: device.deviceCode,
+        device_code: device.deviceCode,
+        deviceName: device.deviceName,
+        device_name: device.deviceName,
+        serialNumber: targetSerialNumber,
+        serial_number: targetSerialNumber,
+        activationCode,
+        authorization_code: activationCode,
+        status: 'ACTIVE',
+        merchant: {
+          id: merchant.id,
+          merchantCode: merchant.merchantCode || 'MCH-1001',
+          businessDisplayName:
+            merchant.businessDisplayName ||
+            `${merchant.firstName || ''} ${merchant.lastName || ''}`.trim() ||
+            'Merchant Account',
+          email: merchant.email || 'merchant@admin.pch.com',
+          phone: merchant.phone || '+1234567890',
+          status: merchant.status || 'ACTIVE',
+        },
+        store: {
+          id: store.id,
+          storeCode: store.storeCode,
+          storeName: store.storeName,
+          storeWebsiteUrl: storeUrl,
+        },
+        registerId: 'REG-01',
+        deviceAccessToken: session.accessToken,
+        accessToken: session.accessToken,
+        token: session.accessToken,
+      },
+    };
   }
 
   @Public()
   @Post('revoke')
   @HttpCode(HttpStatus.OK)
   async revoke(@Body() body: any) {
-    const serial = body?.device_serialnumber || body?.serialNumber || body?.deviceIdentifier || 'SUNMI-D3-ABC123';
+    const serial =
+      body?.device_serialnumber ||
+      body?.serialNumber ||
+      body?.deviceIdentifier ||
+      'SUNMI-D3-ABC123';
     const serialStr = String(serial).trim();
-    activatedSerials.delete(serialStr);
-    try {
-      const dataSource = await connectPostgres('Device Activation Revoke', []);
-      await dataSource.query(
-        `UPDATE public.devices SET "serial_number" = 'SN-UNASSIGNED' WHERE "serial_number" = $1 OR "device_active_code" = 'PK-823914'`,
-        [serialStr],
-      );
-    } catch (err) {}
+    const dataSource = await connectPostgres('Device Activation Revoke', []);
+    await dataSource.query(
+      `UPDATE public.devices SET "serial_number" = 'SN-UNASSIGNED' WHERE "serial_number" = $1 OR "device_active_code" = 'PK-823914'`,
+      [serialStr],
+    );
     return {
       success: true,
       message: 'Device credential revoked successfully',

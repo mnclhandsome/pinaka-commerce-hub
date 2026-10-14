@@ -136,6 +136,7 @@ import { ensureStoreDevicesSchema } from '../store-pos-configuration/device-mapp
 import { ensureVendorStoreSchema } from '../dynamic-query/vendor-store.schema';
 import { ensureStorePosConfigurationSchema } from '../store-pos-configuration/store-pos-configuration.schema';
 import { StorePosConfigurationEntity } from '../../entities/store-pos-configuration.entity';
+import { PosEmployeeAttendanceEntity } from '../../entities/pos-employee-attendance.entity';
 import { ensureMerchantDevicesSchema } from '../device/device.schema';
 import { FileStorageService } from '../file-storage/file-storage.service';
 
@@ -748,6 +749,7 @@ export class MerchantRepository implements OnModuleInit {
         PosTerminalMappingSettingsEntity,
         PosTerminalMappingEntity,
         StorePosConfigurationEntity,
+        PosEmployeeAttendanceEntity,
         StoreEmployeeFastkeyEntity,
         SessionEntity,
         VendorEntity,
@@ -1954,8 +1956,8 @@ export class MerchantRepository implements OnModuleInit {
               es.id AS "employeeStoreId",
               es.store_id AS "storeId",
               es.status AS "assignmentStatus",
-              (es.login_pin_hash IS NOT NULL) AS "pinSet",
-              es.login_pin AS "loginPin",
+              (COALESCE(es.login_pin_hash, e.login_pin_hash) IS NOT NULL) AS "pinSet",
+              COALESCE(es.login_pin, e.login_pin) AS "loginPin",
               r.id AS "roleId",
               r.name AS "roleName",
               r.source_role_template_id AS "roleTemplateId"
@@ -1996,11 +1998,13 @@ export class MerchantRepository implements OnModuleInit {
       );
     const keepIds: string[] = [];
     for (const item of employees) {
+      const empIdParam = item.employee_id || (item as any).employeeId;
       const [employee] = await this.dataSource.query(
-        `SELECT id FROM public.employees
+        `SELECT id, login_pin AS "loginPin", login_pin_hash AS "loginPinHash"
+         FROM public.employees
          WHERE merchant_id = $2::uuid AND (id::text = $1 OR employee_code = $1)
          LIMIT 1`,
-        [item.employee_id, merchantUuid],
+        [empIdParam, merchantUuid],
       );
       if (!employee)
         throw new BadRequestException(
@@ -2021,10 +2025,11 @@ export class MerchantRepository implements OnModuleInit {
          WHERE merchant_id = $1 AND employee_id = $2::uuid AND store_id = $3 LIMIT 1`,
         [merchantUuid, employee.id, storeUuid],
       );
-      const pinHash = item.login_pin
-        ? this.hashEmployeePin(item.login_pin)
-        : existing?.loginPinHash || null;
-      const pinValue = item.login_pin || existing?.loginPin || null;
+      const requestedPin = item.login_pin || (item as any).loginPin;
+      const pinValue = requestedPin || existing?.loginPin || employee?.loginPin || null;
+      const pinHash = requestedPin
+        ? this.hashEmployeePin(requestedPin)
+        : existing?.loginPinHash || employee?.loginPinHash || (pinValue ? this.hashEmployeePin(pinValue) : null);
       let assignmentId = existing?.id as string | undefined;
       if (existing) {
         await this.dataSource.query(
