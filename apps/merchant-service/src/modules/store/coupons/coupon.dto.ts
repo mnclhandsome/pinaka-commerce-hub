@@ -22,6 +22,7 @@ export class CouponInputDto {
   @IsOptional() @IsNumberString() minimumAmount?: string;
   @IsOptional() @IsNumberString() maximumAmount?: string;
   @IsOptional() @IsArray() emailRestrictions?: string[];
+  @IsOptional() @IsArray() requiredProductIds?: number[];
 }
 
 export class CouponSyncDto {

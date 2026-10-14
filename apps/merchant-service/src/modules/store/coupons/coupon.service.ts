@@ -27,11 +27,14 @@ export class CouponService implements OnModuleInit {
   async create(input: CouponInputDto, publicBaseUrl = '') {
     const repo = this.repository();
     await this.validateOwner(input.merchantId, input.storeId);
-    await this.validateProductReferences(input.storeId, input.productIds, input.excludedProductIds);
+    await this.validateProductReferences(input.storeId, input.productIds, input.excludedProductIds, input.requiredProductIds);
     if (await repo.findOne({ where: { storeId: input.storeId, code: this.code(input.code) } })) {
       throw new ConflictException('Coupon code already exists for this store');
     }
     const coupon = repo.create({ ...this.fromInput(input), syncStatus: CouponSyncStatus.PENDING, source: 'PCH' });
+    if (input.requiredProductIds !== undefined) {
+      coupon.woocommercePayload = { meta_data: this.withRequiredProductMeta([], input.requiredProductIds) };
+    }
     await repo.save(coupon);
     const synchronized = await this.push(coupon);
     await this.ensureCouponWebhooks(input.storeId, publicBaseUrl).catch(error => {
@@ -45,10 +48,16 @@ export class CouponService implements OnModuleInit {
     if (coupon.merchantId !== input.merchantId || coupon.storeId !== input.storeId) {
       throw new BadRequestException('A coupon cannot be moved to another merchant or store');
     }
-    await this.validateProductReferences(input.storeId, input.productIds, input.excludedProductIds);
+    await this.validateProductReferences(input.storeId, input.productIds, input.excludedProductIds, input.requiredProductIds);
     const duplicate = await this.repository().findOne({ where: { storeId: input.storeId, code: this.code(input.code) } });
     if (duplicate && duplicate.id !== id) throw new ConflictException('Coupon code already exists for this store');
     Object.assign(coupon, this.fromInput(input), { syncStatus: CouponSyncStatus.PENDING, syncError: null, source: 'PCH', deletedAt: null });
+    if (input.requiredProductIds !== undefined) {
+      coupon.woocommercePayload = {
+        ...(coupon.woocommercePayload || {}),
+        meta_data: this.withRequiredProductMeta(coupon.woocommercePayload?.meta_data, input.requiredProductIds),
+      };
+    }
     await this.repository().save(coupon);
     return this.push(coupon);
   }
@@ -185,9 +194,13 @@ export class CouponService implements OnModuleInit {
     }
     for (const topic of ['coupon.created', 'coupon.updated', 'coupon.deleted']) {
       const found = existing.find(hook => String(hook.topic).toLowerCase() === topic && this.sameDeliveryUrl(hook.delivery_url, callback));
-      if (found && String(found.status).toLowerCase() !== 'active') {
+      if (found) {
+        // WooCommerce never returns the stored secret. Refresh it on every
+        // idempotent registration pass so a deployment/key change cannot leave
+        // an active-looking webhook that fails PCH signature validation.
         await this.request(storeId, `webhooks/${found.id}`, 'PUT', {
           name: `PCH ${topic}`,
+          topic,
           delivery_url: callback,
           secret: connection.webhookSecret,
           status: 'active',
@@ -319,8 +332,8 @@ export class CouponService implements OnModuleInit {
     if (!rows.length) throw new BadRequestException('Store does not belong to the supplied merchant');
   }
 
-  private async validateProductReferences(storeId: string, productIds?: number[], excludedProductIds?: number[]) {
-    const requested = [...new Set([...(productIds || []), ...(excludedProductIds || [])].map(Number))];
+  private async validateProductReferences(storeId: string, productIds?: number[], excludedProductIds?: number[], requiredProductIds?: number[]) {
+    const requested = [...new Set([...(productIds || []), ...(excludedProductIds || []), ...(requiredProductIds || [])].map(Number))];
     if (!requested.length) return;
     if (requested.some(id => !Number.isSafeInteger(id) || id <= 0)) {
       throw new BadRequestException('Coupon productIds and excludedProductIds must contain positive numeric product IDs');
@@ -354,7 +367,7 @@ export class CouponService implements OnModuleInit {
     return { code: this.code(w.code), amount: String(w.amount || '0'), discountType: w.discount_type || 'fixed_cart', description: w.description || '', dateExpires: this.remoteDate(w.date_expires_gmt || w.date_expires), individualUse: !!w.individual_use, productIds: this.numberIds(w.product_ids), excludedProductIds: this.numberIds(w.excluded_product_ids), usageLimit: w.usage_limit ?? null, usageLimitPerUser: w.usage_limit_per_user ?? null, limitUsageToXItems: w.limit_usage_to_x_items ?? null, usageCount: w.usage_count || 0, freeShipping: !!w.free_shipping, productCategories: this.numberIds(w.product_categories), excludedProductCategories: this.numberIds(w.excluded_product_categories), excludeSaleItems: !!w.exclude_sale_items, minimumAmount: String(w.minimum_amount || '0'), maximumAmount: String(w.maximum_amount || '0'), emailRestrictions: w.email_restrictions || [], usedBy: (w.used_by || []).map(String), woocommercePayload: w, woocommerceDateCreated: this.remoteDate(w.date_created_gmt || w.date_created), woocommerceDateModified: this.remoteDate(w.date_modified_gmt || w.date_modified) };
   }
 
-  private toWoo(c: StoreCouponEntity) { return { code: c.code, amount: String(c.amount), discount_type: c.discountType, description: c.description, date_expires: c.dateExpires?.toISOString() || null, individual_use: c.individualUse, product_ids: c.productIds, excluded_product_ids: c.excludedProductIds, usage_limit: c.usageLimit, usage_limit_per_user: c.usageLimitPerUser, limit_usage_to_x_items: c.limitUsageToXItems, free_shipping: c.freeShipping, product_categories: c.productCategories, excluded_product_categories: c.excludedProductCategories, exclude_sale_items: c.excludeSaleItems, minimum_amount: String(c.minimumAmount), maximum_amount: String(c.maximumAmount), email_restrictions: c.emailRestrictions }; }
+  private toWoo(c: StoreCouponEntity) { return { code: c.code, amount: String(c.amount), discount_type: c.discountType, description: c.description, date_expires: c.dateExpires?.toISOString() || null, individual_use: c.individualUse, product_ids: c.productIds, excluded_product_ids: c.excludedProductIds, usage_limit: c.usageLimit, usage_limit_per_user: c.usageLimitPerUser, limit_usage_to_x_items: c.limitUsageToXItems, free_shipping: c.freeShipping, product_categories: c.productCategories, excluded_product_categories: c.excludedProductCategories, exclude_sale_items: c.excludeSaleItems, minimum_amount: String(c.minimumAmount), maximum_amount: String(c.maximumAmount), email_restrictions: c.emailRestrictions, meta_data: Array.isArray(c.woocommercePayload?.meta_data) ? c.woocommercePayload.meta_data : [] }; }
   private byWooId(storeId: string, id: number) { return this.repository().findOne({ where: { storeId, woocommerceCouponId: String(id) } }); }
   private code(value: string) { return String(value || '').trim().toLowerCase(); }
   private remoteDate(value: any) { const date = value ? new Date(value) : null; return date && !Number.isNaN(date.getTime()) ? date : null; }
@@ -367,6 +380,16 @@ export class CouponService implements OnModuleInit {
     const serializedStrings = [...text.matchAll(/s:\d+:"(\d+)"/g)].map(match => Number(match[1]));
     if (serializedStrings.length) return [...new Set(serializedStrings)];
     return [...new Set((text.match(/\d+/g) || []).map(Number).filter(Number.isFinite))];
+  }
+  private withRequiredProductMeta(value: unknown, requiredProductIds: number[]): Array<Record<string, unknown>> {
+    const keys = new Set(['required_product_ids', '_required_product_ids']);
+    const metadata = Array.isArray(value)
+      ? value.filter((item: any) => item && typeof item === 'object' && !keys.has(String(item.key))).map((item: any) => ({ ...item }))
+      : [];
+    const ids = this.numberIds(requiredProductIds);
+    metadata.push({ key: 'required_product_ids', value: ids });
+    metadata.push({ key: '_required_product_ids', value: ids.map(String) });
+    return metadata;
   }
   private samePayload(current: unknown, remote: unknown): boolean {
     if (!current) return false;
