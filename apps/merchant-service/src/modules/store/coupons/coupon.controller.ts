@@ -3,7 +3,7 @@ import { CouponInputDto, CouponSyncDto } from './coupon.dto';
 import { CouponService } from './coupon.service';
 import { Public } from '@pinaka-delivery-hub/auth';
 
-@Controller(['api/v1/coupons', 'connector/api/v1/coupons'])
+@Controller(['merchant/api/v1/coupons', 'connector/merchant/api/v1/coupons'])
 export class CouponController {
   constructor(@Inject(CouponService) private readonly coupons: CouponService) {}
   @Post() async create(@Body() body: CouponInputDto, @Req() request: any) { return { success: true, coupon: await this.coupons.create(body, this.publicBaseUrl(request)) }; }
