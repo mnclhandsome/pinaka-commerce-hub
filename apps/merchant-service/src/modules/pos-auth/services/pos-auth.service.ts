@@ -6,11 +6,11 @@ import {
   BadRequestException,
   Inject,
 } from '@nestjs/common';
-import { connectPostgres } from '@pinaka-delivery-hub/database';
 import { MerchantStoreLoginDto } from '../dto/merchant-store-login.dto';
 import { PosLoginDto } from '../dto/pos-login.dto';
 import { PinService } from './pin.service';
 import { PosSessionService } from './pos-session.service';
+import { MerchantRepository } from '../../merchant/merchant.repository';
 
 export interface DeviceContext {
   deviceId: string;
@@ -25,6 +25,7 @@ export class PosAuthService {
   constructor(
     @Inject(PinService) private readonly pinService: PinService,
     @Inject(PosSessionService) private readonly posSessionService: PosSessionService,
+    @Inject(MerchantRepository) private readonly merchantRepository: MerchantRepository,
   ) {}
 
   /**
@@ -51,7 +52,7 @@ export class PosAuthService {
       throw new BadRequestException('Merchant identifier (merchantId, code, or email) is required');
     }
 
-    const dataSource = await connectPostgres('POS Auth Service', []);
+    const dataSource = this.merchantRepository.requireDataSource();
     const merchants: any[] = await dataSource.query(
       `SELECT id, 
               COALESCE("merchant_code", "merchantCode") AS "merchantCode", 
@@ -190,9 +191,10 @@ export class PosAuthService {
     let store: any = null;
     let merchant: any = null;
     let matchedRole: string = 'CASHIER';
+    let matchedRoleName: string = 'Cashier';
     let matchedRoleId: string = 'ROLE001';
 
-    const dataSource = await connectPostgres('POS Auth Service', []);
+    const dataSource = this.merchantRepository.requireDataSource();
 
       // If serial number is passed, resolve device
       if (bodySerial && !deviceId) {
@@ -282,9 +284,11 @@ export class PosAuthService {
         FROM public.employee_stores es
         JOIN public.employees e ON e.id = es.employee_id
         LEFT JOIN LATERAL (
-          SELECT esr.role_id, rt.role_code, rt.name AS role_name
+          SELECT esr.role_id, COALESCE(rt.role_code, legacy_role.role_code) AS role_code,
+            COALESCE(rt.name, legacy_role.name) AS role_name
           FROM public.employee_store_roles esr
           LEFT JOIN public.role_templates rt ON rt.id = esr.role_id
+          LEFT JOIN public.roles legacy_role ON legacy_role.id = esr.role_id
           WHERE esr.employee_store_id = es.id
             AND (esr.status IS NULL OR UPPER(esr.status::text) <> 'INACTIVE')
           ORDER BY esr.created_at ASC
@@ -368,6 +372,7 @@ export class PosAuthService {
         };
         if (cand.roleCode || cand.roleName || cand.roleId) {
           matchedRole = cand.roleCode || cand.roleName || 'CASHIER';
+          matchedRoleName = cand.roleName || cand.roleCode || 'Cashier';
           matchedRoleId = cand.roleId || 'ROLE001';
         }
         break;
@@ -422,11 +427,12 @@ export class PosAuthService {
       registerId: registerId,
       roleId: matchedRoleId,
       roleCode: matchedRole,
+      roleName: matchedRoleName,
     });
 
     // Save session into employee_sessions table
     try {
-      const dataSource = await connectPostgres('POS Auth Service', []);
+      const dataSource = this.merchantRepository.requireDataSource();
       await dataSource.query(`
         CREATE TABLE IF NOT EXISTS public.employee_sessions (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -653,7 +659,7 @@ export class PosAuthService {
     const token = this.extractBearerToken(authorization);
     const payload = this.posSessionService.verifyAccessToken(token);
 
-    const dataSource = await connectPostgres('POS Auth Service', []);
+    const dataSource = this.merchantRepository.requireDataSource();
     let session: EmployeeSessionRow | undefined;
     try {
       const rows = await dataSource.query(

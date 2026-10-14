@@ -79,6 +79,26 @@ export async function ensurePosSafeDropSchema(db: DataSource): Promise<void> {
         CONSTRAINT pos_safe_drop_settings_tube_chk CHECK (tube_size IS NULL OR tube_size > 0)
       )
     `);
+    // Older installations may have created this table without a primary key. PostgreSQL
+    // requires the referenced id column to be unique before the child-table foreign keys
+    // can be installed.
+    await manager.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint c
+          WHERE c.conrelid = 'public.pos_safe_drop_settings'::regclass
+            AND c.contype IN ('p', 'u')
+            AND (
+              SELECT array_agg(a.attname::text ORDER BY key_column.ordinality)
+              FROM unnest(c.conkey) WITH ORDINALITY AS key_column(attnum, ordinality)
+              JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = key_column.attnum
+            ) = ARRAY['id']::text[]
+        ) THEN
+          CREATE UNIQUE INDEX IF NOT EXISTS pos_safe_drop_settings_id_uq
+            ON public.pos_safe_drop_settings (id);
+        END IF;
+      END $$;
+    `);
     await manager.query(`
       CREATE TABLE IF NOT EXISTS public.pos_safe_drop_tubes (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

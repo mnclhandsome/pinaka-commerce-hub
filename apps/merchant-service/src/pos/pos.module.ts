@@ -1,5 +1,5 @@
-import { DiscountController } from './Discount/discount.controller';
-import { DiscountService } from './Discount/discount.service';
+import { DiscountController } from './discount/discount.controller';
+import { DiscountService } from './discount/discount.service';
 import { Module } from '@nestjs/common';
 import { PosCardPaymentController } from './card-payments/pos-card-payment.controller';
 import { PosCardPaymentService } from './card-payments/pos-card-payment.service';

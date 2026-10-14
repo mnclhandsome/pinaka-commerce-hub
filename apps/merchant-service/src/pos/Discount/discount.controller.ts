@@ -9,7 +9,7 @@ export class DiscountController {
 
   private assertStoreAccess(storeId: string, user?: { role?: string; storeId?: string }) {
     const role = String(user?.role ?? '').trim().toUpperCase();
-    if (['ADMIN', 'ADMINISTRATOR'].includes(role) && user?.storeId !== storeId) {
+    if (['ADMIN', 'ADMINISTRATOR', 'MERCHANT_ADMIN'].includes(role) && user?.storeId !== storeId) {
       throw new ForbiddenException('Store administrators can access discounts only for their assigned store');
     }
   }
@@ -25,6 +25,35 @@ export class DiscountController {
   list(@Param('storeId') storeId: string, @Query() query: Record<string, string>, @Req() request: { user?: { role?: string; storeId?: string } }) {
     this.assertStoreAccess(storeId, request.user);
     return this.discounts.list(storeId, request.user?.role, query);
+  }
+
+  @Get(':storeId/discounts/auto')
+  @HttpCode(200)
+  listAuto(@Param('storeId') storeId: string, @Query() query: Record<string, string>, @Req() request: { user?: { role?: string; storeId?: string } }) {
+    this.assertStoreAccess(storeId, request.user);
+    return this.discounts.listByType(storeId, 'auto', request.user?.role, query);
+  }
+
+  @Get(':storeId/discounts/mix_match')
+  @HttpCode(200)
+  listMixMatch(@Param('storeId') storeId: string, @Query() query: Record<string, string>, @Req() request: { user?: { role?: string; storeId?: string } }) {
+    this.assertStoreAccess(storeId, request.user);
+    return this.discounts.listByType(storeId, 'mix_match', request.user?.role, query);
+  }
+
+  @Get(':storeId/discounts/multipack')
+  @HttpCode(200)
+  listMultipack(@Param('storeId') storeId: string, @Query() query: Record<string, string>, @Req() request: { user?: { role?: string; storeId?: string } }) {
+    this.assertStoreAccess(storeId, request.user);
+    return this.discounts.listByType(storeId, 'multipack', request.user?.role, query);
+  }
+
+  @Get(':storeId/discounts/:type/:id')
+  @HttpCode(200)
+  getById(@Param('storeId') storeId: string, @Param('type') type: string, @Param('id') id: string,
+    @Req() request: { user?: { role?: string; storeId?: string } }) {
+    this.assertStoreAccess(storeId, request.user);
+    return this.discounts.getById(storeId, type, id, request.user?.role);
   }
 
   @Get(':storeId/discount-rules')

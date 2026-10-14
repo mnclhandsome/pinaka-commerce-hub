@@ -10,8 +10,8 @@ import {
   NotFoundException,
   Inject,
 } from '@nestjs/common';
-import { connectPostgres } from '@pinaka-delivery-hub/database';
 import { PosSessionService } from '../pos-auth/services/pos-session.service';
+import { MerchantRepository } from '../merchant/merchant.repository';
 
 export class ActivateDeviceDto {
   activationCode?: string;
@@ -28,6 +28,7 @@ const activatedSerials = new Set<string>();
 export class DeviceActivationController {
   constructor(
     @Inject(PosSessionService) private readonly posSessionService: PosSessionService,
+    @Inject(MerchantRepository) private readonly merchantRepository: MerchantRepository,
   ) {}
 
   @Public()
@@ -43,7 +44,7 @@ export class DeviceActivationController {
     }
 
     try {
-      const dataSource = await connectPostgres('Device Activation', []);
+      const dataSource = this.merchantRepository.requireDataSource();
 
       // Auto-migrate column if missing
       await dataSource.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "device_active_code" VARCHAR(100);`);
@@ -150,6 +151,8 @@ export class DeviceActivationController {
         deviceId: device.id || device.deviceCode,
         registerId: 'REG-01',
         roleId: 'ROLE001',
+        roleCode: 'CASHIER',
+        roleName: 'Cashier',
       });
 
       const storeUrl = store.storeWebsiteUrl ||
@@ -235,7 +238,7 @@ export class DeviceActivationController {
     const serialStr = String(serial).trim();
     activatedSerials.delete(serialStr);
     try {
-      const dataSource = await connectPostgres('Device Activation Revoke', []);
+      const dataSource = this.merchantRepository.requireDataSource();
       await dataSource.query(
         `UPDATE public.devices SET "serial_number" = 'SN-UNASSIGNED' WHERE "serial_number" = $1 OR "device_active_code" = 'PK-823914'`,
         [serialStr],

@@ -1,4 +1,4 @@
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { createMissingTables } from '@pinaka-delivery-hub/database';
 import { StoreDiscountEntity } from '../../entities/store-discount.entity';
 import { BadRequestException, ForbiddenException, Inject, Injectable, InternalServerErrorException, NotFoundException, OnModuleInit } from '@nestjs/common';
@@ -21,6 +21,40 @@ export class DiscountService implements OnModuleInit {
     await source.initialize();
     try {
       await createMissingTables(source);
+      // Older databases may have the table without the unique index declared by the entity.
+      // Discount writes use ON CONFLICT (store_id), which requires this index.
+      await source.query(`CREATE UNIQUE INDEX IF NOT EXISTS store_discounts_store_id_uq
+        ON public.store_discounts (store_id)`);
+      await source.query(`
+        CREATE TABLE IF NOT EXISTS public.discounts (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          store_id uuid NOT NULL,
+          discount_type varchar(30) NOT NULL CHECK (discount_type IN ('auto', 'mix_match', 'multipack')),
+          discount_id varchar(100) NOT NULL,
+          payload jsonb NOT NULL,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now(),
+          is_deleted boolean NOT NULL DEFAULT false,
+          CONSTRAINT discounts_store_type_external_id_uq UNIQUE (store_id, discount_type, discount_id)
+        )
+      `);
+      await source.query(`CREATE UNIQUE INDEX IF NOT EXISTS discounts_store_type_external_id_uq
+        ON public.discounts (store_id, discount_type, discount_id)`);
+      // Backfill records already cached in store_discounts so both tables start aligned.
+      await source.query(`
+        INSERT INTO public.discounts (store_id, discount_type, discount_id, payload)
+        SELECT DISTINCT ON (sd.store_id, group_row.key, COALESCE(item.value->>'wordpressId', item.value->>'id', item.value->>'pchId'))
+          sd.store_id, group_row.key, COALESCE(item.value->>'wordpressId', item.value->>'id', item.value->>'pchId'), item.value
+        FROM public.store_discounts sd
+        CROSS JOIN LATERAL jsonb_each(CASE WHEN jsonb_typeof(sd.payload)='object' THEN sd.payload ELSE '{}'::jsonb END) group_row(key, value)
+        CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(group_row.value)='array' THEN group_row.value ELSE '[]'::jsonb END) item(value)
+        WHERE COALESCE(sd.is_deleted, false)=false
+          AND group_row.key IN ('auto', 'mix_match', 'multipack')
+          AND COALESCE(item.value->>'wordpressId', item.value->>'id', item.value->>'pchId') IS NOT NULL
+        ORDER BY sd.store_id, group_row.key, COALESCE(item.value->>'wordpressId', item.value->>'id', item.value->>'pchId')
+        ON CONFLICT (store_id, discount_type, discount_id) DO UPDATE
+          SET payload=EXCLUDED.payload, updated_at=now(), is_deleted=false
+      `);
     } finally {
       await source.destroy();
     }
@@ -63,7 +97,40 @@ export class DiscountService implements OnModuleInit {
 
   async list(storeId: string, role?: string, query: Record<string, string> = {}) {
     const connection = await this.requireWordPressConnection(storeId, role);
-    return this.wordpressRequest(connection, 'custom-discount/get-all-discounts-for-admin', 'GET', undefined, query);
+    const response = await this.wordpressRequest(connection, 'custom-discount/get-all-discounts-for-admin', 'GET', undefined, query);
+    for (const group of ['auto', 'mix_match', 'multipack']) {
+      const records = response?.data?.[group];
+      if (!Array.isArray(records)) continue;
+      for (const record of records) {
+        if (record?.id === undefined || record?.id === null) continue;
+        await this.persistWithoutChangingResponse(
+          () => this.saveDiscount(storeId, group, this.canonicalizeWordPressRecord(record), String(record.id)),
+          storeId,
+        );
+      }
+    }
+    return response;
+  }
+
+  async listByType(storeId: string, type: string, role?: string, query: Record<string, string> = {}) {
+    const group = this.discountGroup(type);
+    const response = await this.list(storeId, role, query);
+    return {
+      data: Array.isArray(response?.data?.[group]) ? response.data[group] : [],
+      ...(response?.pagination ? { pagination: response.pagination } : {}),
+    };
+  }
+
+  async getById(storeId: string, type: string, id: string, role?: string) {
+    this.requireDiscountRole(role);
+    const group = this.discountGroup(type);
+    const [row] = await this.merchants.requireDataSource().query(
+      `SELECT payload FROM public.discounts
+       WHERE store_id=$1::uuid AND discount_type=$2 AND discount_id=$3 AND COALESCE(is_deleted,false)=false`,
+      [storeId, group, id],
+    );
+    if (!row) throw new NotFoundException(`Discount '${id}' not found for type '${group}'`);
+    return row.payload;
   }
 
   async listRules(storeId: string, role?: string) {
@@ -112,7 +179,11 @@ export class DiscountService implements OnModuleInit {
       }
     }
     if (wordpressId !== undefined && wordpressId !== null) {
-      const record = { ...input, id: wordpressId, pchId: String(wordpressId), syncStatus: 'SYNCED' };
+      const sourceRecord = await this.fetchWordPressDiscount(connection, group, wordpressId);
+      const record = sourceRecord
+        ? this.canonicalizeWordPressRecord(sourceRecord)
+        : this.canonicalizeRequestRecord(input);
+      Object.assign(record, { id: wordpressId, pchId: String(wordpressId), syncStatus: 'SYNCED' });
       await this.persistWithoutChangingResponse(() => this.saveDiscount(connection.storeId, group, record), connection.storeId);
     }
     return response;
@@ -125,7 +196,11 @@ export class DiscountService implements OnModuleInit {
     const wordpressId = previous.wordpressId ?? previous.id;
     const body = { ...this.toWordPressPayload({ ...previous, ...input, type }), discount_id: Number(wordpressId) };
     const response = await this.wordpressRequest(connection, 'custom-discount/update-discount', 'POST', body);
-    const record = { ...previous, ...input, id: wordpressId, pchId: id, syncStatus: 'SYNCED' };
+    const sourceRecord = await this.fetchWordPressDiscount(connection, group, wordpressId);
+    const record = sourceRecord
+      ? this.canonicalizeWordPressRecord(sourceRecord)
+      : this.canonicalizeRequestRecord({ ...previous, ...input });
+    Object.assign(record, { id: wordpressId, pchId: id, syncStatus: 'SYNCED' });
     await this.persistWithoutChangingResponse(() => this.saveDiscount(connection.storeId, group, record, id), connection.storeId);
     return response;
   }
@@ -158,7 +233,66 @@ export class DiscountService implements OnModuleInit {
       'pinaka_discount_auto_apply', 'discount_product_ids', 'qty'];
     const output: Record<string, any> = { type: this.discountGroup(input.type) };
     for (const key of allowed) if (input[key] !== undefined) output[key] = input[key];
+    const dateStarts = input.date_starts ?? input.date_start ?? input.start_date ?? input.startDate;
+    const dateExpires = input.date_expires ?? input.date_expire ?? input.expiry_date ?? input.expiryDate;
+    if (dateStarts !== undefined) output.date_starts = dateStarts;
+    if (dateExpires !== undefined) output.date_expires = dateExpires;
     return output;
+  }
+
+  private canonicalizeWordPressRecord(record: Record<string, any>) {
+    const canonical = { ...record };
+    if (canonical.start_date === undefined) {
+      canonical.start_date = canonical.date_starts ?? canonical.date_start ?? canonical.startDate;
+    }
+    if (canonical.expiry_date === undefined) {
+      canonical.expiry_date = canonical.date_expires ?? canonical.date_expire ?? canonical.expiryDate;
+    }
+    for (const alias of ['date_starts', 'date_start', 'startDate', 'date_expires', 'date_expire', 'expiryDate']) {
+      delete canonical[alias];
+    }
+    return canonical;
+  }
+
+  private canonicalizeRequestRecord(record: Record<string, any>) {
+    const canonical = { ...record };
+    const dateStarts = canonical.date_starts ?? canonical.date_start ?? canonical.start_date ?? canonical.startDate;
+    const dateExpires = canonical.date_expires ?? canonical.date_expire ?? canonical.expiry_date ?? canonical.expiryDate;
+    if (dateStarts !== undefined) canonical.start_date = dateStarts;
+    if (dateExpires !== undefined) canonical.expiry_date = dateExpires;
+    for (const alias of ['date_starts', 'date_start', 'startDate', 'date_expires', 'date_expire', 'expiryDate']) {
+      delete canonical[alias];
+    }
+    return canonical;
+  }
+
+  private async fetchWordPressDiscount(
+    connection: { wordpressUrl: string; wordpressJwt: string },
+    group: string,
+    id: string | number,
+  ): Promise<Record<string, any> | undefined> {
+    try {
+      for (let page = 1; page <= 100; page++) {
+        const response = await this.wordpressRequest(
+          connection,
+          'custom-discount/get-all-discounts-for-admin',
+          'GET',
+          undefined,
+          { page: String(page), per_page: '100' },
+        );
+        const records = response?.data?.[group];
+        if (Array.isArray(records)) {
+          const record = records.find((item: any) => String(item?.id) === String(id));
+          if (record) return record;
+        }
+        const hasMore = response?.pagination?.has_more === true;
+        if (!hasMore && (!Array.isArray(records) || records.length < 100)) break;
+      }
+    } catch {
+      // A successful write should still be mirrored locally using the request values
+      // if WooCommerce's read-after-write list request is temporarily unavailable.
+    }
+    return undefined;
   }
 
   private async wordpressRequest(connection: { wordpressUrl: string; wordpressJwt: string }, path: string, method: string, body?: any, query: Record<string, string> = {}) {
@@ -196,20 +330,46 @@ export class DiscountService implements OnModuleInit {
   }
 
   private async saveDiscount(storeId: string, group: string, record: any, replaceId?: string) {
-    const payload = await this.readDiscountPayload(storeId);
-    const records = Array.isArray(payload[group]) ? payload[group] : [];
-    const index = replaceId ? records.findIndex((item: any) => String(item.pchId ?? item.id) === replaceId) : -1;
-    if (index >= 0) records[index] = record; else records.push(record);
-    payload[group] = records;
-    await this.merchants.requireDataSource().query(`INSERT INTO public.store_discounts (store_id,payload) VALUES ($1::uuid,$2::jsonb)
-      ON CONFLICT (store_id) DO UPDATE SET payload=EXCLUDED.payload,updated_at=now(),is_deleted=false`, [storeId, JSON.stringify(payload)]);
+    await this.merchants.requireDataSource().transaction(async manager => {
+      const [row] = await manager.query('SELECT payload FROM public.store_discounts WHERE store_id=$1::uuid AND COALESCE(is_deleted,false)=false FOR UPDATE', [storeId]);
+      const payload = row?.payload ?? { auto: [], mix_match: [], multipack: [] };
+      const records = Array.isArray(payload[group]) ? payload[group] : [];
+      const index = replaceId ? records.findIndex((item: any) => String(item.pchId ?? item.id) === replaceId) : -1;
+      if (index >= 0) records[index] = record; else records.push(record);
+      payload[group] = records;
+      await this.writeDiscountSnapshot(manager, storeId, payload);
+    });
   }
 
   private async removeDiscount(storeId: string, group: string, id: string) {
-    const payload = await this.readDiscountPayload(storeId);
-    payload[group] = (payload[group] ?? []).filter((item: any) => String(item.pchId ?? item.id) !== id);
-    await this.merchants.requireDataSource().query(`INSERT INTO public.store_discounts (store_id,payload) VALUES ($1::uuid,$2::jsonb)
-      ON CONFLICT (store_id) DO UPDATE SET payload=EXCLUDED.payload,updated_at=now(),is_deleted=false`, [storeId, JSON.stringify(payload)]);
+    await this.merchants.requireDataSource().transaction(async manager => {
+      const [row] = await manager.query('SELECT payload FROM public.store_discounts WHERE store_id=$1::uuid AND COALESCE(is_deleted,false)=false FOR UPDATE', [storeId]);
+      const payload = row?.payload ?? { auto: [], mix_match: [], multipack: [] };
+      payload[group] = (payload[group] ?? []).filter((item: any) => String(item.pchId ?? item.id) !== id);
+      await this.writeDiscountSnapshot(manager, storeId, payload);
+    });
+  }
+
+  private async writeDiscountSnapshot(manager: EntityManager, storeId: string, payload: Record<string, any[]>) {
+    const canonicalPayload: Record<string, any[]> = {};
+    for (const group of ['auto', 'mix_match', 'multipack']) {
+      canonicalPayload[group] = (Array.isArray(payload[group]) ? payload[group] : [])
+        .map(record => this.canonicalizeWordPressRecord(record));
+    }
+    await manager.query(`INSERT INTO public.store_discounts (store_id,payload) VALUES ($1::uuid,$2::jsonb)
+      ON CONFLICT (store_id) DO UPDATE SET payload=EXCLUDED.payload,updated_at=now(),is_deleted=false`, [storeId, JSON.stringify(canonicalPayload)]);
+    await manager.query('DELETE FROM public.discounts WHERE store_id=$1::uuid', [storeId]);
+    for (const group of ['auto', 'mix_match', 'multipack']) {
+      for (const record of canonicalPayload[group]) {
+        const discountId = record.wordpressId ?? record.id ?? record.pchId;
+        if (discountId === undefined || discountId === null) continue;
+        await manager.query(`INSERT INTO public.discounts (store_id,discount_type,discount_id,payload)
+          VALUES ($1::uuid,$2,$3,$4::jsonb)
+          ON CONFLICT (store_id,discount_type,discount_id) DO UPDATE
+          SET payload=EXCLUDED.payload,updated_at=now(),is_deleted=false`,
+        [storeId, group, String(discountId), JSON.stringify(record)]);
+      }
+    }
   }
 
   async syncStoreDiscountsFromWordPress(params: {
@@ -269,10 +429,8 @@ export class DiscountService implements OnModuleInit {
       }
     }
     if (!completed) throw new BadRequestException('Discount pagination limit reached; saved discounts were not replaced');
-    await this.merchants.requireDataSource().query(`
-      INSERT INTO public.store_discounts (store_id,payload) VALUES ($1::uuid,$2::jsonb)
-      ON CONFLICT (store_id) DO UPDATE SET payload=EXCLUDED.payload,updated_at=now(),is_deleted=false
-    `, [params.storeId, JSON.stringify(payload)]);
+    await this.merchants.requireDataSource().transaction(manager =>
+      this.writeDiscountSnapshot(manager, params.storeId, payload));
     return { discountCount: Object.values(payload).reduce((sum, items) => sum + items.length, 0), skippedCount };
   }
 
@@ -313,10 +471,7 @@ export class DiscountService implements OnModuleInit {
   }
 
   private async requireWordPressConnection(storeId: string, role?: string) {
-    const normalizedRole = String(role ?? '').trim().toUpperCase();
-    if (process.env.SKIP_AUTH !== 'true' && !['OWNER', 'ADMIN', 'ADMINISTRATOR'].includes(normalizedRole)) {
-      throw new ForbiddenException('Only owners or store administrators can manage website connections');
-    }
+    this.requireDiscountRole(role);
     const store = await this.merchants.getStoreById(storeId);
     if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
     const connector = await this.merchants.getWebsiteConnection(store.id)
@@ -333,6 +488,13 @@ export class DiscountService implements OnModuleInit {
       wordpressUrl: connector.wordpressUrl,
       wordpressJwt: this.decryptConnectorSecret(connector.encryptedJwt),
     };
+  }
+
+  private requireDiscountRole(role?: string) {
+    const normalizedRole = String(role ?? '').trim().toUpperCase();
+    if (process.env.SKIP_AUTH !== 'true' && !['OWNER', 'ADMIN', 'ADMINISTRATOR', 'MERCHANT_ADMIN'].includes(normalizedRole)) {
+      throw new ForbiddenException('Only owners or store administrators can manage website connections');
+    }
   }
 
 }
