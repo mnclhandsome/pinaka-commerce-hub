@@ -36,7 +36,9 @@ export class PosEmployeeAttendanceService implements OnModuleInit {
       message: 'Clock-in successful',
       employee: {
         employeeCode: employee.employeeCode,
+        employee_code: employee.employeeCode,
         employeeName: `${employee.firstName} ${employee.lastName}`.trim(),
+        employee_name: `${employee.firstName} ${employee.lastName}`.trim(),
       },
       attendance: record,
     };
@@ -50,25 +52,37 @@ export class PosEmployeeAttendanceService implements OnModuleInit {
       message: 'Clock-out successful',
       employee: {
         employeeCode: employee.employeeCode,
+        employee_code: employee.employeeCode,
         employeeName: `${employee.firstName} ${employee.lastName}`.trim(),
+        employee_name: `${employee.firstName} ${employee.lastName}`.trim(),
       },
       attendance: record,
     };
   }
 
   async list(identity: PosAttendanceIdentity, filters: PosEmployeeAttendanceQueryDto) {
-    if (filters.merchantId && filters.merchantId !== identity.merchantId) {
+    const filterMerchantId = filters.resolvedMerchantId;
+    const filterStoreId = filters.resolvedStoreId;
+    const filterEmployeeCode = filters.resolvedEmployeeCode;
+
+    if (filterMerchantId && filterMerchantId !== identity.merchantId) {
       throw new ForbiddenException({ success: false, message: 'Attendance access is limited to the authenticated merchant' });
     }
-    if (filters.storeId && filters.storeId !== identity.storeId) {
+    if (filterStoreId && filterStoreId !== identity.storeId) {
       throw new ForbiddenException({ success: false, message: 'Attendance access is limited to the authenticated store' });
     }
-    if (filters.employeeCode && filters.employeeCode !== identity.employeeCode) {
+    if (filterEmployeeCode && filterEmployeeCode !== identity.employeeCode) {
       throw new ForbiddenException({ success: false, message: 'Attendance access is limited to the authenticated employee' });
     }
     return {
       success: true,
-      ...(await this.attendance.listForEmployee(identity, filters)),
+      ...(await this.attendance.listForEmployee(identity, {
+        employeeCode: filterEmployeeCode,
+        date: filters.date,
+        status: filters.status,
+        page: filters.page,
+        limit: filters.limit,
+      })),
     };
   }
 
@@ -76,16 +90,30 @@ export class PosEmployeeAttendanceService implements OnModuleInit {
     const attendance = await this.attendance.findOpenForEmployee(identity);
     return {
       success: true,
-      employee: { employeeCode: identity.employeeCode },
+      employee: {
+        employeeCode: identity.employeeCode,
+        employee_code: identity.employeeCode,
+      },
       currentAttendance: attendance,
     };
   }
 
   private async authenticate(dto: PosEmployeeAttendanceClockDto) {
+    const employeeCode = dto.resolvedEmployeeCode;
+    const merchantId = dto.resolvedMerchantId;
+    const storeId = dto.resolvedStoreId;
+
+    if (!employeeCode || !merchantId || !storeId) {
+      throw new BadRequestException({
+        success: false,
+        message: 'employeeCode, merchantId, and storeId are required',
+      });
+    }
+
     const employee = await this.attendance.findActiveEmployee(
-      dto.employeeCode,
-      dto.merchantId,
-      dto.storeId,
+      employeeCode,
+      merchantId,
+      storeId,
     );
     if (!employee || !(await this.attendance.hasActiveStoreAssignment(employee.id, employee.storeId))) {
       throw new UnauthorizedException({
@@ -103,9 +131,6 @@ export class PosEmployeeAttendanceService implements OnModuleInit {
     }
     let validPin = false;
     try {
-      // Keep attendance PIN validation aligned with POS login: employee-store
-      // PINs take precedence, and PinService supports the existing hash formats
-      // as well as legacy plain-text PINs.
       validPin = await this.pins.verify(dto.pin.trim(), hash);
     } catch {
       validPin = false;

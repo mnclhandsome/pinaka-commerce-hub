@@ -134,6 +134,7 @@ import { ensureStoreDevicesSchema } from '../store-pos-configuration/device-mapp
 import { ensureVendorStoreSchema } from '../dynamic-query/vendor-store.schema';
 import { ensureStorePosConfigurationSchema } from '../store-pos-configuration/store-pos-configuration.schema';
 import { StorePosConfigurationEntity } from '../../entities/store-pos-configuration.entity';
+import { PosEmployeeAttendanceEntity } from '../../entities/pos-employee-attendance.entity';
 import { ensureMerchantDevicesSchema } from '../device/device.schema';
 
 interface WordPressProductNode {
@@ -739,6 +740,7 @@ export class MerchantRepository implements OnModuleInit {
         PosTerminalMappingSettingsEntity,
         PosTerminalMappingEntity,
         StorePosConfigurationEntity,
+        PosEmployeeAttendanceEntity,
         StoreEmployeeFastkeyEntity,
         SessionEntity,
         VendorEntity,
