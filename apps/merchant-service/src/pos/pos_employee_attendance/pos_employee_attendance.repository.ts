@@ -113,7 +113,7 @@ export class PosEmployeeAttendanceRepository {
 
         const open = await manager.query(
           `SELECT id FROM public.pos_employee_attendance
-           WHERE "employeeId" = $1::uuid AND "clockOut" IS NULL LIMIT 1`,
+           WHERE employee_id = $1::uuid AND clock_out IS NULL LIMIT 1`,
           [employee.id],
         );
         if (open.length) {
@@ -122,9 +122,28 @@ export class PosEmployeeAttendanceRepository {
 
         const rows = await manager.query(
           `INSERT INTO public.pos_employee_attendance
-             ("merchantId", "storeId", "employeeId", "employeeCode", "employeeName", "clockIn", status)
+             (merchant_id, store_id, employee_id, employee_code, employee_name, clock_in, status)
            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, clock_timestamp(), 'PRESENT')
-           RETURNING id::text AS id, "clockIn", "clockOut", status`,
+           RETURNING id::text AS id,
+                     merchant_id AS "merchantId",
+                     store_id AS "storeId",
+                     employee_id AS "employeeId",
+                     employee_code AS "employeeCode",
+                     employee_name AS "employeeName",
+                     clock_in AS "clockIn",
+                     clock_out AS "clockOut",
+                     created_at AS "createdAt",
+                     updated_at AS "updatedAt",
+                     merchant_id,
+                     store_id,
+                     employee_id,
+                     employee_code,
+                     employee_name,
+                     clock_in,
+                     clock_out,
+                     status,
+                     created_at,
+                     updated_at`,
           [
             employee.merchantId,
             employee.storeId,
@@ -154,13 +173,13 @@ export class PosEmployeeAttendanceRepository {
       }
 
       const open = await manager.query(
-        `SELECT id::text AS id, "clockIn"
+        `SELECT id::text AS id, clock_in AS "clockIn", clock_in
          FROM public.pos_employee_attendance
-         WHERE "employeeId" = $1::uuid
-           AND "merchantId" = $2::uuid
-           AND "storeId" = $3::uuid
-           AND "clockOut" IS NULL
-         ORDER BY "clockIn" DESC LIMIT 1 FOR UPDATE`,
+         WHERE employee_id = $1::uuid
+           AND merchant_id = $2::uuid
+           AND store_id = $3::uuid
+           AND clock_out IS NULL
+         ORDER BY clock_in DESC LIMIT 1 FOR UPDATE`,
         [employee.id, employee.merchantId, employee.storeId],
       );
       if (!open.length) {
@@ -172,10 +191,29 @@ export class PosEmployeeAttendanceRepository {
 
       const updated = await manager.query(
         `UPDATE public.pos_employee_attendance
-         SET "clockOut" = clock_timestamp(), status = 'COMPLETED', "updatedAt" = now()
-         WHERE id = $1::uuid AND "clockOut" IS NULL
-           AND "clockIn" <= clock_timestamp()
-         RETURNING id::text AS id, "clockIn", "clockOut", status`,
+         SET clock_out = clock_timestamp(), status = 'COMPLETED', updated_at = now()
+         WHERE id = $1::uuid AND clock_out IS NULL
+           AND clock_in <= clock_timestamp()
+         RETURNING id::text AS id,
+                   merchant_id AS "merchantId",
+                   store_id AS "storeId",
+                   employee_id AS "employeeId",
+                   employee_code AS "employeeCode",
+                   employee_name AS "employeeName",
+                   clock_in AS "clockIn",
+                   clock_out AS "clockOut",
+                   created_at AS "createdAt",
+                   updated_at AS "updatedAt",
+                   merchant_id,
+                   store_id,
+                   employee_id,
+                   employee_code,
+                   employee_name,
+                   clock_in,
+                   clock_out,
+                   status,
+                   created_at,
+                   updated_at`,
         [open[0].id],
       );
       if (!updated.length) {
@@ -187,13 +225,32 @@ export class PosEmployeeAttendanceRepository {
 
   async findOpenForEmployee(identity: PosAttendanceIdentity) {
     const rows = await this.db.query(
-      `SELECT id::text AS id, "employeeCode", "employeeName", "clockIn", "clockOut", status
+      `SELECT id::text AS id,
+              merchant_id AS "merchantId",
+              store_id AS "storeId",
+              employee_id AS "employeeId",
+              employee_code AS "employeeCode",
+              employee_name AS "employeeName",
+              clock_in AS "clockIn",
+              clock_out AS "clockOut",
+              created_at AS "createdAt",
+              updated_at AS "updatedAt",
+              merchant_id,
+              store_id,
+              employee_id,
+              employee_code,
+              employee_name,
+              clock_in,
+              clock_out,
+              status,
+              created_at,
+              updated_at
        FROM public.pos_employee_attendance
-       WHERE "employeeId" = $1::uuid
-         AND "merchantId" = $2::uuid
-         AND "storeId" = $3::uuid
-         AND "clockOut" IS NULL
-       ORDER BY "clockIn" DESC LIMIT 1`,
+       WHERE employee_id = $1::uuid
+         AND merchant_id = $2::uuid
+         AND store_id = $3::uuid
+         AND clock_out IS NULL
+       ORDER BY clock_in DESC LIMIT 1`,
       [identity.employeeId, identity.merchantId, identity.storeId],
     );
     return rows[0] ?? null;
@@ -202,17 +259,17 @@ export class PosEmployeeAttendanceRepository {
   async listForEmployee(identity: PosAttendanceIdentity, filters: PosAttendanceListFilters) {
     const values: unknown[] = [identity.merchantId, identity.storeId, identity.employeeId];
     const where = [
-      '"merchantId"::text = $1',
-      '"storeId"::text = $2',
-      '"employeeId"::text = $3',
+      'merchant_id::text = $1',
+      'store_id::text = $2',
+      'employee_id::text = $3',
     ];
     if (filters.employeeCode) {
       values.push(filters.employeeCode.trim());
-      where.push(`"employeeCode" = $${values.length}`);
+      where.push(`employee_code = $${values.length}`);
     }
     if (filters.date) {
       values.push(filters.date);
-      where.push(`"clockIn" >= $${values.length}::date AND "clockIn" < ($${values.length}::date + interval '1 day')`);
+      where.push(`clock_in >= $${values.length}::date AND clock_in < ($${values.length}::date + interval '1 day')`);
     }
     if (filters.status) {
       values.push(filters.status);
@@ -227,16 +284,28 @@ export class PosEmployeeAttendanceRepository {
     values.push(filters.limit, (filters.page - 1) * filters.limit);
     const rows = await this.db.query(
       `SELECT id::text AS id,
-              "employeeCode",
-              "employeeName",
-              "clockIn",
-              "clockOut",
+              merchant_id AS "merchantId",
+              store_id AS "storeId",
+              employee_id AS "employeeId",
+              employee_code AS "employeeCode",
+              employee_name AS "employeeName",
+              clock_in AS "clockIn",
+              clock_out AS "clockOut",
+              created_at AS "createdAt",
+              updated_at AS "updatedAt",
+              merchant_id,
+              store_id,
+              employee_id,
+              employee_code,
+              employee_name,
+              clock_in,
+              clock_out,
               status,
-              "createdAt",
-              "updatedAt"
+              created_at,
+              updated_at
        FROM public.pos_employee_attendance
        WHERE ${whereSql}
-       ORDER BY "clockIn" DESC
+       ORDER BY clock_in DESC
        LIMIT $${values.length - 1} OFFSET $${values.length}`,
       values,
     );

@@ -110,6 +110,18 @@ export class PosSafeTransactionsService implements OnModuleInit {
         ON public.pos_safe_drop_transactions (store_id, shift_id, created_at DESC);
       DO $$ BEGIN
         IF to_regclass('public.pos_shifts') IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM pg_constraint c
+          WHERE c.conrelid = 'public.pos_shifts'::regclass
+            AND c.contype IN ('p', 'u')
+            AND (
+              SELECT array_agg(a.attname::text ORDER BY key_column.ordinality)
+              FROM unnest(c.conkey) WITH ORDINALITY AS key_column(attnum, ordinality)
+              JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = key_column.attnum
+            ) = ARRAY['id']::text[]
+        ) THEN
+          CREATE UNIQUE INDEX IF NOT EXISTS pos_shifts_id_uq ON public.pos_shifts (id);
+        END IF;
+        IF to_regclass('public.pos_shifts') IS NOT NULL AND NOT EXISTS (
           SELECT 1 FROM pg_constraint WHERE conname = 'pos_safe_transactions_shift_fk'
         ) THEN
           ALTER TABLE public.pos_safe_transactions ADD CONSTRAINT pos_safe_transactions_shift_fk

@@ -7,9 +7,11 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Inject,
   InternalServerErrorException,
   NotFoundException,
   OnModuleInit,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { FeatureEntity, FeatureStatus } from '../../entities/feature.entity';
@@ -134,7 +136,9 @@ import { ensureStoreDevicesSchema } from '../store-pos-configuration/device-mapp
 import { ensureVendorStoreSchema } from '../dynamic-query/vendor-store.schema';
 import { ensureStorePosConfigurationSchema } from '../store-pos-configuration/store-pos-configuration.schema';
 import { StorePosConfigurationEntity } from '../../entities/store-pos-configuration.entity';
+import { PosEmployeeAttendanceEntity } from '../../entities/pos-employee-attendance.entity';
 import { ensureMerchantDevicesSchema } from '../device/device.schema';
+import { FileStorageService } from '../file-storage/file-storage.service';
 
 interface WordPressProductNode {
   id?: number;
@@ -173,6 +177,12 @@ const mappingRequired = `COALESCE((to_jsonb(mapping)->>'required')::boolean, fal
 
 @Injectable()
 export class MerchantRepository implements OnModuleInit {
+  constructor(
+    @Optional()
+    @Inject(FileStorageService)
+    private readonly files?: FileStorageService,
+  ) {}
+
   async getSubscribedFeatures(merchantId: string, storeTypeId: string) {
     if (!this.isDbConnected || !this.dataSource?.isInitialized)
       throw new ServiceUnavailableException(
@@ -739,6 +749,7 @@ export class MerchantRepository implements OnModuleInit {
         PosTerminalMappingSettingsEntity,
         PosTerminalMappingEntity,
         StorePosConfigurationEntity,
+        PosEmployeeAttendanceEntity,
         StoreEmployeeFastkeyEntity,
         SessionEntity,
         VendorEntity,
@@ -1107,6 +1118,17 @@ export class MerchantRepository implements OnModuleInit {
     }
     for (const store of result.stores)
       await this.cacheStorePin(store.activationPin, store);
+    if (this.files) {
+      const merchantLabel =
+        result.merchant.businessDisplayName ||
+        result.merchant.merchantCode ||
+        result.merchant.merchantId ||
+        'merchant';
+      await this.files.ensureMerchantFolder(merchantLabel);
+      for (const store of result.stores) {
+        await this.files.ensureStoreFolder(merchantLabel, store.storeName);
+      }
+    }
     return result;
   }
 
@@ -1161,6 +1183,9 @@ export class MerchantRepository implements OnModuleInit {
       undefined,
       saved.email,
       { businessName: saved.businessName },
+    );
+    await this.files?.ensureMerchantFolder(
+      saved.businessDisplayName || saved.merchantCode || saved.merchantId || 'merchant',
     );
     return saved;
   }
@@ -1252,6 +1277,32 @@ export class MerchantRepository implements OnModuleInit {
       ),
     ];
     return { merchantId: row.merchantId, merchantUuid: row.uuid, aliases };
+  }
+
+  private async merchantFolderLabel(merchantId: string): Promise<string> {
+    try {
+      const rows = await this.dataSource.query(
+        `SELECT to_jsonb(m) AS data
+         FROM public.merchants m
+         WHERE m.id::text = $1
+            OR m.merchant_id = $1
+            OR m.merchant_code = $1
+         LIMIT 1`,
+        [merchantId],
+      );
+      const data = (rows[0]?.data ?? {}) as Record<string, unknown>;
+      return String(
+        data.business_display_name ||
+          data.businessDisplayName ||
+          data.businessName ||
+          data.merchantName ||
+          data.merchant_code ||
+          data.merchantCode ||
+          merchantId,
+      );
+    } catch {
+      return merchantId;
+    }
   }
 
   async storeMatchesMerchant(
@@ -1389,6 +1440,10 @@ export class MerchantRepository implements OnModuleInit {
       'merchant',
       { storeName: entity.storeName, pin: activationPin },
     );
+    await this.files?.ensureStoreFolder(
+      await this.merchantFolderLabel(identity.merchantUuid),
+      entity.storeName,
+    );
     return entity;
   }
 
@@ -1441,6 +1496,10 @@ export class MerchantRepository implements OnModuleInit {
         store.id,
         'merchant',
         { storeName: store.storeName },
+      );
+      await this.files?.ensureStoreFolder(
+        await this.merchantFolderLabel(identity.merchantUuid),
+        store.storeName,
       );
     }
     return stores;
@@ -1912,7 +1971,11 @@ export class MerchantRepository implements OnModuleInit {
          ORDER BY esr.created_at ASC
          LIMIT 1
        ) r ON true
-       WHERE es.merchant_id = $1 AND es.store_id = $2 AND es.status = 'ACTIVE'
+       WHERE es.merchant_id = $1
+         AND es.store_id = $2
+         AND es.status = 'ACTIVE'
+         AND e.status = 'ACTIVE'
+         AND e.merchant_id = es.merchant_id
        ORDER BY e.first_name ASC, e.last_name ASC`,
       [merchantUuid, storeUuid],
     );
@@ -1941,7 +2004,8 @@ export class MerchantRepository implements OnModuleInit {
     for (const item of employees) {
       const empIdParam = item.employee_id || (item as any).employeeId;
       const [employee] = await this.dataSource.query(
-        `SELECT id, login_pin AS "loginPin", login_pin_hash AS "loginPinHash"
+        `SELECT id, login_pin AS "loginPin",
+                login_pin_hash AS "loginPinHash"
          FROM public.employees
          WHERE merchant_id = $2::uuid AND (id::text = $1 OR employee_code = $1)
          LIMIT 1`,
@@ -1966,11 +2030,22 @@ export class MerchantRepository implements OnModuleInit {
          WHERE merchant_id = $1 AND employee_id = $2::uuid AND store_id = $3 LIMIT 1`,
         [merchantUuid, employee.id, storeUuid],
       );
-      const requestedPin = item.login_pin || (item as any).loginPin;
-      const pinValue = requestedPin || existing?.loginPin || employee?.loginPin || null;
-      const pinHash = requestedPin
-        ? this.hashEmployeePin(requestedPin)
-        : existing?.loginPinHash || employee?.loginPinHash || (pinValue ? this.hashEmployeePin(pinValue) : null);
+      // Assignment-screen requests commonly omit login_pin when assigning an
+      // employee that already has a merchant-level PIN. Copy that PIN into the
+      // store assignment so employee_stores remains the source used by POS.
+      const assignmentPin =
+        item.login_pin || employee.loginPin || existing?.loginPin || null;
+      if (assignmentPin && !item.login_pin) {
+        await this.assertUniqueStoreLoginPin(
+          storeUuid,
+          employee.id,
+          assignmentPin,
+        );
+      }
+      const pinHash = assignmentPin
+        ? this.hashEmployeePin(assignmentPin)
+        : existing?.loginPinHash || null;
+      const pinValue = assignmentPin;
       let assignmentId = existing?.id as string | undefined;
       if (existing) {
         await this.dataSource.query(

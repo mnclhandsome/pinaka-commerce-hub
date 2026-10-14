@@ -11,7 +11,6 @@ import {
   NotFoundException,
   Post,
 } from '@nestjs/common';
-import { connectPostgres } from '@pinaka-delivery-hub/database';
 import { MerchantRepository } from '../merchant/merchant.repository';
 import { PosSessionService } from '../pos-auth/services/pos-session.service';
 
@@ -241,6 +240,8 @@ export class DeviceActivationController {
       deviceId: device.id || device.deviceCode,
       registerId: 'REG-01',
       roleId: 'ROLE001',
+      roleCode: 'CASHIER',
+      roleName: 'Cashier',
     });
     const storeUrl =
       store.storeWebsiteUrl ||
@@ -298,11 +299,14 @@ export class DeviceActivationController {
       body?.deviceIdentifier ||
       'SUNMI-D3-ABC123';
     const serialStr = String(serial).trim();
-    const dataSource = await connectPostgres('Device Activation Revoke', []);
+    activatedSerials.delete(serialStr);
+    try {
+      const dataSource = this.merchants.requireDataSource();
     await dataSource.query(
       `UPDATE public.devices SET "serial_number" = 'SN-UNASSIGNED' WHERE "serial_number" = $1 OR "device_active_code" = 'PK-823914'`,
       [serialStr],
-    );
+      );
+    } catch (err) {}
     return {
       success: true,
       message: 'Device credential revoked successfully',

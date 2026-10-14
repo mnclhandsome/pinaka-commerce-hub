@@ -58,12 +58,30 @@ export class OrderRepository implements OnModuleInit {
         host: process.env.REDIS_HOST || 'localhost',
         port: Number(process.env.REDIS_PORT) || 6379,
         lazyConnect: true,
+        connectTimeout: Number(process.env.REDIS_CONNECT_TIMEOUT_MS) || 3000,
         maxRetriesPerRequest: 1,
+        // Do not hold Nest's startup open retrying an unavailable optional cache.
+        retryStrategy: () => null,
       });
-      await this.redisClient.connect();
+      const redisConnectTimeoutMs = Number(process.env.REDIS_CONNECT_TIMEOUT_MS) || 3000;
+      let redisConnectTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          this.redisClient.connect(),
+          new Promise<never>((_, reject) => {
+            redisConnectTimer = setTimeout(
+              () => reject(new Error(`Redis connection timed out after ${redisConnectTimeoutMs}ms`)),
+              redisConnectTimeoutMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (redisConnectTimer) clearTimeout(redisConnectTimer);
+      }
       this.isRedisConnected = true;
       console.log('⚡ [Order Service Redis] Connected to Redis Container');
     } catch (err: any) {
+      this.redisClient?.disconnect();
       console.log(`⚠️ [Order Service Redis] Offline (${err.message}).`);
       this.isRedisConnected = false;
     }
