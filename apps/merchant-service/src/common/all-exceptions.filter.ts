@@ -51,6 +51,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
   }
 
   private httpExceptionBody(exception: HttpException, status: number) {
+    if ((exception as HttpException & { preserveResponseBody?: boolean }).preserveResponseBody) {
+      return exception.getResponse() as Record<string, unknown>;
+    }
     const response = exception.getResponse();
     const error = httpErrorName(status);
     if (typeof response === 'string') {

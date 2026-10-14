@@ -198,7 +198,7 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
   private takeStoreLoginPin(
     body: unknown,
     required: boolean,
-  ): { body: unknown; loginPinHash?: string } {
+  ): { body: unknown; loginPinHash?: string; loginPin?: string } {
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       if (required)
         throw new BadRequestException(
@@ -214,9 +214,10 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
         );
       return { body: payload };
     }
-    const loginPinHash = this.hashStoreLoginPin(payload.loginPin);
+    const loginPin = payload.loginPin as string;
+    const loginPinHash = this.hashStoreLoginPin(loginPin);
     delete payload.loginPin;
-    return { body: payload, loginPinHash };
+    return { body: payload, loginPinHash, loginPin };
   }
 
   async execute(
@@ -248,8 +249,19 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
       body = extracted.body;
       if (extracted.loginPinHash)
         fields.__loginPinHash = extracted.loginPinHash;
+      if (extracted.loginPin !== undefined)
+        fields.__loginPin = extracted.loginPin;
     }
-    if (['create', 'replace', 'patch'].includes(operation))
+    const hasRemainingPatchFields =
+      body && typeof body === 'object' && !Array.isArray(body)
+        ? Object.keys(body as Record<string, unknown>).length > 0
+        : false;
+    if (
+      ['create', 'replace', 'patch'].includes(operation) &&
+      (operation !== 'patch' ||
+        hasRemainingPatchFields ||
+        !fields.__loginPinHash)
+    )
       fields = { ...fields, ...this.fields(config, body, operation) };
     if (config.name === 'RolePermissions' && fields.storeId) {
       fields.storeId = this.id(String(fields.storeId), 'storeId');
@@ -321,6 +333,8 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
         payload = extracted.body;
         if (extracted.loginPinHash)
           fields.__loginPinHash = extracted.loginPinHash;
+        if (extracted.loginPin !== undefined)
+          fields.__loginPin = extracted.loginPin;
       }
       Object.assign(fields, this.fields(config, payload, 'create'));
       if (config.name === 'RolePermissions' && fields.storeId)
@@ -1545,7 +1559,9 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
       }
       this.dates(fields);
       const loginPinHash = fields.__loginPinHash;
+      const loginPin = fields.__loginPin;
       delete fields.__loginPinHash;
+      delete fields.__loginPin;
       const entries = Object.entries(fields);
       const assignmentStore =
         config.name === 'EmployeeStoreRoles'
@@ -1562,7 +1578,7 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
         ...(config.tenantColumn ? [config.tenantField || 'merchantId'] : []),
         ...(config.name === 'EmployeeStoreRoles' ? ['store_id'] : []),
         ...(config.name === 'EmployeeStores' && loginPinHash
-          ? ['login_pin_hash']
+          ? ['login_pin_hash', 'login_pin']
           : []),
         ...(softDeleteStoreTypeMapping ? ['is_deleted'] : []),
         ...(softDeleteStoreTypeMapping ? ['created_by', 'updated_by'] : []),
@@ -1574,7 +1590,7 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
         ...(config.tenantColumn ? [tenantValue] : []),
         ...(config.name === 'EmployeeStoreRoles' ? [assignmentStore] : []),
         ...(config.name === 'EmployeeStores' && loginPinHash
-          ? [loginPinHash]
+          ? [loginPinHash, loginPin]
           : []),
         ...(softDeleteStoreTypeMapping ? [false] : []),
         ...(softDeleteStoreTypeMapping ? [auditUserId, null] : []),
@@ -1635,17 +1651,23 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
     }
     this.dates({ ...existing, ...fields });
     const loginPinHash = fields.__loginPinHash;
+    const loginPin = fields.__loginPin;
     delete fields.__loginPinHash;
+    delete fields.__loginPin;
     const entries = Object.entries(fields);
     const assignments = entries.map(
       ([key], i) => `${quoteIdent(config.fields[key].column)} = $${i + 3}`,
     );
     if (softDeleteStoreTypeMapping)
       assignments.push(`${quoteIdent('updated_by')} = $${entries.length + 3}`);
-    if (loginPinHash)
+    if (loginPinHash) {
       assignments.push(
         `${quoteIdent('login_pin_hash')} = $${entries.length + (softDeleteStoreTypeMapping ? 4 : 3)}`,
       );
+      assignments.push(
+        `${quoteIdent('login_pin')} = $${entries.length + (softDeleteStoreTypeMapping ? 5 : 4)}`,
+      );
+    }
     if (config.timestamps)
       assignments.push(
         `${quoteIdent(config.updatedColumn || 'updatedAt')} = clock_timestamp()`,
@@ -1658,7 +1680,7 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
         child,
         ...entries.map(([, value]) => value),
         ...(softDeleteStoreTypeMapping ? [auditUserId] : []),
-        ...(loginPinHash ? [loginPinHash] : []),
+        ...(loginPinHash ? [loginPinHash, loginPin] : []),
       ],
     );
     await this.syncStoreFeatureToPlans(

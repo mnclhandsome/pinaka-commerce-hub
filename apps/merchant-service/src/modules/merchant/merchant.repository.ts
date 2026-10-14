@@ -1971,7 +1971,11 @@ export class MerchantRepository implements OnModuleInit {
          ORDER BY esr.created_at ASC
          LIMIT 1
        ) r ON true
-       WHERE es.merchant_id = $1 AND es.store_id = $2 AND es.status = 'ACTIVE'
+       WHERE es.merchant_id = $1
+         AND es.store_id = $2
+         AND es.status = 'ACTIVE'
+         AND e.status = 'ACTIVE'
+         AND e.merchant_id = es.merchant_id
        ORDER BY e.first_name ASC, e.last_name ASC`,
       [merchantUuid, storeUuid],
     );
@@ -2000,7 +2004,8 @@ export class MerchantRepository implements OnModuleInit {
     for (const item of employees) {
       const empIdParam = item.employee_id || (item as any).employeeId;
       const [employee] = await this.dataSource.query(
-        `SELECT id, login_pin AS "loginPin", login_pin_hash AS "loginPinHash"
+        `SELECT id, login_pin AS "loginPin",
+                login_pin_hash AS "loginPinHash"
          FROM public.employees
          WHERE merchant_id = $2::uuid AND (id::text = $1 OR employee_code = $1)
          LIMIT 1`,
@@ -2025,11 +2030,22 @@ export class MerchantRepository implements OnModuleInit {
          WHERE merchant_id = $1 AND employee_id = $2::uuid AND store_id = $3 LIMIT 1`,
         [merchantUuid, employee.id, storeUuid],
       );
-      const requestedPin = item.login_pin || (item as any).loginPin;
-      const pinValue = requestedPin || existing?.loginPin || employee?.loginPin || null;
-      const pinHash = requestedPin
-        ? this.hashEmployeePin(requestedPin)
-        : existing?.loginPinHash || employee?.loginPinHash || (pinValue ? this.hashEmployeePin(pinValue) : null);
+      // Assignment-screen requests commonly omit login_pin when assigning an
+      // employee that already has a merchant-level PIN. Copy that PIN into the
+      // store assignment so employee_stores remains the source used by POS.
+      const assignmentPin =
+        item.login_pin || employee.loginPin || existing?.loginPin || null;
+      if (assignmentPin && !item.login_pin) {
+        await this.assertUniqueStoreLoginPin(
+          storeUuid,
+          employee.id,
+          assignmentPin,
+        );
+      }
+      const pinHash = assignmentPin
+        ? this.hashEmployeePin(assignmentPin)
+        : existing?.loginPinHash || null;
+      const pinValue = assignmentPin;
       let assignmentId = existing?.id as string | undefined;
       if (existing) {
         await this.dataSource.query(
