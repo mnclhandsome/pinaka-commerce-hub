@@ -7,9 +7,11 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Inject,
   InternalServerErrorException,
   NotFoundException,
   OnModuleInit,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { FeatureEntity, FeatureStatus } from '../../entities/feature.entity';
@@ -135,6 +137,7 @@ import { ensureVendorStoreSchema } from '../dynamic-query/vendor-store.schema';
 import { ensureStorePosConfigurationSchema } from '../store-pos-configuration/store-pos-configuration.schema';
 import { StorePosConfigurationEntity } from '../../entities/store-pos-configuration.entity';
 import { ensureMerchantDevicesSchema } from '../device/device.schema';
+import { FileStorageService } from '../file-storage/file-storage.service';
 
 interface WordPressProductNode {
   id?: number;
@@ -173,6 +176,12 @@ const mappingRequired = `COALESCE((to_jsonb(mapping)->>'required')::boolean, fal
 
 @Injectable()
 export class MerchantRepository implements OnModuleInit {
+  constructor(
+    @Optional()
+    @Inject(FileStorageService)
+    private readonly files?: FileStorageService,
+  ) {}
+
   async getSubscribedFeatures(merchantId: string, storeTypeId: string) {
     if (!this.isDbConnected || !this.dataSource?.isInitialized)
       throw new ServiceUnavailableException(
@@ -1107,6 +1116,17 @@ export class MerchantRepository implements OnModuleInit {
     }
     for (const store of result.stores)
       await this.cacheStorePin(store.activationPin, store);
+    if (this.files) {
+      const merchantLabel =
+        result.merchant.businessDisplayName ||
+        result.merchant.merchantCode ||
+        result.merchant.merchantId ||
+        'merchant';
+      await this.files.ensureMerchantFolder(merchantLabel);
+      for (const store of result.stores) {
+        await this.files.ensureStoreFolder(merchantLabel, store.storeName);
+      }
+    }
     return result;
   }
 
@@ -1161,6 +1181,9 @@ export class MerchantRepository implements OnModuleInit {
       undefined,
       saved.email,
       { businessName: saved.businessName },
+    );
+    await this.files?.ensureMerchantFolder(
+      saved.businessDisplayName || saved.merchantCode || saved.merchantId || 'merchant',
     );
     return saved;
   }
@@ -1252,6 +1275,32 @@ export class MerchantRepository implements OnModuleInit {
       ),
     ];
     return { merchantId: row.merchantId, merchantUuid: row.uuid, aliases };
+  }
+
+  private async merchantFolderLabel(merchantId: string): Promise<string> {
+    try {
+      const rows = await this.dataSource.query(
+        `SELECT to_jsonb(m) AS data
+         FROM public.merchants m
+         WHERE m.id::text = $1
+            OR m.merchant_id = $1
+            OR m.merchant_code = $1
+         LIMIT 1`,
+        [merchantId],
+      );
+      const data = (rows[0]?.data ?? {}) as Record<string, unknown>;
+      return String(
+        data.business_display_name ||
+          data.businessDisplayName ||
+          data.businessName ||
+          data.merchantName ||
+          data.merchant_code ||
+          data.merchantCode ||
+          merchantId,
+      );
+    } catch {
+      return merchantId;
+    }
   }
 
   async storeMatchesMerchant(
@@ -1389,6 +1438,10 @@ export class MerchantRepository implements OnModuleInit {
       'merchant',
       { storeName: entity.storeName, pin: activationPin },
     );
+    await this.files?.ensureStoreFolder(
+      await this.merchantFolderLabel(identity.merchantUuid),
+      entity.storeName,
+    );
     return entity;
   }
 
@@ -1441,6 +1494,10 @@ export class MerchantRepository implements OnModuleInit {
         store.id,
         'merchant',
         { storeName: store.storeName },
+      );
+      await this.files?.ensureStoreFolder(
+        await this.merchantFolderLabel(identity.merchantUuid),
+        store.storeName,
       );
     }
     return stores;

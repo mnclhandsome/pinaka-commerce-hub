@@ -25,6 +25,7 @@ import {
 } from './merchant-crud.service';
 import { SubscriptionPlanChangeController } from '../master/plans/subscription-plan-change.controller';
 import { MerchantRepository } from './merchant.repository';
+import { FileStorageService } from '../file-storage/file-storage.service';
 
 const fields = [
   'merchantName',
@@ -96,6 +97,7 @@ function actorId(input: Input, sessionUserId?: string): string | null {
 export class CompactMerchantController {
   constructor(
     @Inject(MerchantRepository) private readonly repository: MerchantRepository,
+    @Inject(FileStorageService) private readonly files: FileStorageService,
   ) {}
 
   private get db() {
@@ -590,6 +592,14 @@ export class CompactMerchantController {
       }
       throw error;
     }
+    await this.files.ensureMerchantFolder(
+      String(
+        input.businessDisplayName ||
+          input.businessName ||
+          input.merchantName ||
+          'merchant',
+      ),
+    );
     return { success: true, ...(await this.getRecord(savedId)) };
   }
 
