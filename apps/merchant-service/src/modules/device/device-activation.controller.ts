@@ -109,7 +109,25 @@ export class DeviceActivationController {
     let merchant: any;
     let store: any;
     try {
-      const dataSource = this.merchantRepository.requireDataSource();
+      const result = await this.merchantRepository
+        .requireDataSource()
+        .transaction(async (manager) => {
+          const [found] = await manager.query(
+            `SELECT id, device_code AS "deviceCode", device_name AS "deviceName",
+                  merchant_id AS "merchantId", serial_number AS "serialNumber",
+                  device_id AS "deviceId", status
+           FROM public.devices
+           WHERE (device_active_code = $1 OR authorization_code = $1)
+           ORDER BY is_deleted ASC, created_at DESC
+           LIMIT 1
+           FOR UPDATE`,
+            [activationCode],
+          );
+          if (!found) {
+            throw new BadRequestException(
+              'Activation code does not match. Please check your activation code and try again.',
+            );
+          }
 
           const status = String(found.status || '').toUpperCase();
           if (status !== 'ACTIVE' && status !== 'PENDING_ACTIVATION') {
@@ -243,64 +261,16 @@ export class DeviceActivationController {
         activationCode,
         authorization_code: activationCode,
         status: 'ACTIVE',
-      };
-
-      const stores = await dataSource.query(
-        `SELECT id, "store_code" AS "storeCode", "store_name" AS "storeName", 
-                "store_website_url" AS "storeWebsiteUrl", status
-         FROM public.stores 
-         WHERE (merchant_id::text = $1 OR merchant_id IN (SELECT id FROM public.merchants WHERE "merchantId" = $1 OR "merchantCode" = $1)) AND status = 'ACTIVE'
-         ORDER BY created_at ASC
-         LIMIT 1`,
-        [String(merchant.id)],
-      );
-      const store = stores[0] || {
-        id: '22222222-2222-2222-2222-222222222222',
-        storeCode: 'STORE-NORTH-01',
-        storeName: 'North Branch Store',
-        storeWebsiteUrl: 'https://north.adminmerchant.pch.com',
-      };
-
-      const session = await this.posSessionService.createSession({
-        employeeId: 'EMP-DEVICE-ACTIVATION',
-        merchantId: merchant.id,
-        storeId: store.id,
-        deviceId: device.id || device.deviceCode,
-        registerId: 'REG-01',
-        roleId: 'ROLE001',
-        roleCode: 'CASHIER',
-        roleName: 'Cashier',
-      });
-
-      const storeUrl = store.storeWebsiteUrl ||
-        `https://${(store.storeCode || 'store').toLowerCase()}.${(merchant.merchantCode || 'merchant').toLowerCase()}.pch.com`;
-
-      return {
-        success: true,
-        message: 'Device activated successfully',
-        data: {
-          deviceId: device.id,
-          deviceCode: device.deviceCode || 'DEV-99881',
-          deviceName: device.deviceName || 'SUNMI POS Terminal',
-          serialNumber: serialNumber,
-          activationCode: activationCode,
-          status: 'ACTIVE',
-          merchant: {
-            id: merchant.id,
-            merchantCode: merchant.merchantCode || 'MCH-1001',
-            businessDisplayName: merchant.businessDisplayName || `${merchant.firstName || ''} ${merchant.lastName || ''}`.trim() || 'Merchant Account',
-            email: merchant.email || 'merchant@admin.pch.com',
-            phone: merchant.phone || '+1234567890',
-            status: merchant.status || 'ACTIVE',
-          },
-          store: {
-            id: store.id,
-            storeCode: store.storeCode,
-            storeName: store.storeName,
-            storeWebsiteUrl: storeUrl,
-          },
-          registerId: 'REG-01',
-          deviceAccessToken: session.accessToken,
+        merchant: {
+          id: merchant.id,
+          merchantCode: merchant.merchantCode || 'MCH-1001',
+          businessDisplayName:
+            merchant.businessDisplayName ||
+            `${merchant.firstName || ''} ${merchant.lastName || ''}`.trim() ||
+            'Merchant Account',
+          email: merchant.email || 'merchant@admin.pch.com',
+          phone: merchant.phone || '+1234567890',
+          status: merchant.status || 'ACTIVE',
         },
         store: {
           id: store.id,
@@ -326,7 +296,6 @@ export class DeviceActivationController {
       body?.deviceIdentifier ||
       'SUNMI-D3-ABC123';
     const serialStr = String(serial).trim();
-    activatedSerials.delete(serialStr);
     try {
       const dataSource = this.merchantRepository.requireDataSource();
       await dataSource.query(
