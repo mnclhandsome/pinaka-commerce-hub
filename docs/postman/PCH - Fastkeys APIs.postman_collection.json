@@ -1,0 +1,308 @@
+{
+  "info": {
+    "name": "PCH - Fastkeys APIs",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Fastkey APIs backed by public.store_employee_fastkeys (the current entity table name). Set baseUrl and token. Create captures fastkey_id. Set product_id/product_id_2 to IDs from the store catalog. Image upload field: fastkey_image; JPG/PNG/WebP, maximum 5 MB. Deleting a fastkey currently uses GET, as implemented. Additional route aliases are documented on each request."
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3003/api/v1"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "fastkey_id",
+      "value": ""
+    },
+    {
+      "key": "product_id",
+      "value": "123"
+    },
+    {
+      "key": "product_id_2",
+      "value": "456"
+    },
+    {
+      "key": "fastkey_title",
+      "value": "Postman Fastkey"
+    },
+    {
+      "key": "fastkey_image_url",
+      "value": "https://example.com/fastkey.jpg"
+    },
+    {
+      "key": "store_id",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Create fastkey - JSON",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/fastkeys/create",
+        "description": "Alias: /fastkeys/fastkeys/create. Index must be a string.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fastkey_title\": \"{{fastkey_title}}\",\n  \"fastkey_index\": \"1\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code >= 200 && pm.response.code < 300) {",
+              "  const body = pm.response.json();",
+              "  if (body.fastkey_id) pm.collectionVariables.set(\"fastkey_id\", body.fastkey_id);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Create fastkey - upload image",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": "{{baseUrl}}/fastkeys/create",
+        "description": "Select a local image file before sending. Let Postman set the multipart Content-Type.",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "fastkey_title",
+              "value": "{{fastkey_title}} with image",
+              "type": "text"
+            },
+            {
+              "key": "fastkey_index",
+              "value": "2",
+              "type": "text"
+            },
+            {
+              "key": "fastkey_image",
+              "type": "file",
+              "src": []
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code >= 200 && pm.response.code < 300) {",
+              "  const body = pm.response.json();",
+              "  if (body.fastkey_id) pm.collectionVariables.set(\"fastkey_id\", body.fastkey_id);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "List fastkeys",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/fastkeys/get-by-user",
+        "description": "Aliases: get-by-uesr, get_by_user."
+      }
+    },
+    {
+      "name": "List fastkeys by store ID",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/fastkeys/get-by-store-id/{{store_id}}",
+        "description": "Returns non-deleted fastkeys for all employees in the selected store. Set store_id to a Store UUID."
+      }
+    },
+    {
+      "name": "Get fastkey by ID",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/fastkeys/get-by-fastkey-id/{{fastkey_id}}",
+        "description": ""
+      }
+    },
+    {
+      "name": "List fastkey image catalog",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/fastkeys/get-all-fastkeys-images",
+        "description": ""
+      }
+    },
+    {
+      "name": "List store fastkey images",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/store/get-all-fastkeys-images",
+        "description": ""
+      }
+    },
+    {
+      "name": "Update fastkey - JSON",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/fastkeys/update-fastkey",
+        "description": "Aliases: update, update-fastkeys. Optional fastkey_image may contain an image URL.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fastkey_id\": \"{{fastkey_id}}\",\n  \"fastkey_title\": \"{{fastkey_title}} Updated\",\n  \"fastkey_index\": \"3\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Update fastkey - upload image",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": "{{baseUrl}}/fastkeys/update-fastkey",
+        "description": "Select a local image file before sending.",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "fastkey_id",
+              "value": "{{fastkey_id}}",
+              "type": "text"
+            },
+            {
+              "key": "fastkey_title",
+              "value": "{{fastkey_title}} Updated",
+              "type": "text"
+            },
+            {
+              "key": "fastkey_image",
+              "type": "file",
+              "src": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Add products",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/fastkeys/add-products",
+        "description": "Aliases: add_products, fastkeys/add-products. Product IDs are strings; sl_number is an integer starting at 1.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fastkey_id\": \"{{fastkey_id}}\",\n  \"products\": [\n    {\n      \"product_id\": \"{{product_id}}\",\n      \"sl_number\": 1\n    },\n    {\n      \"product_id\": \"{{product_id_2}}\",\n      \"sl_number\": 2\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Update fastkey products",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/fastkeys/update-fastkey-products",
+        "description": "Aliases: update/fastkey-products, update_fastkey_products.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fastkey_id\": \"{{fastkey_id}}\",\n  \"products\": [\n    {\n      \"product_id\": \"{{product_id}}\",\n      \"sl_number\": 1\n    }\n  ]\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Delete product from fastkey",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{baseUrl}}/fastkeys/delete-product",
+        "description": "Alias: delete_product.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fastkey_id\": \"{{fastkey_id}}\",\n  \"product_id\": \"{{product_id}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "Delete fastkey",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/fastkeys/delete-fastkey/{{fastkey_id}}",
+        "description": "This GET request performs deletion. Run only when you intend to delete the selected fastkey."
+      }
+    }
+  ]
+}

@@ -3,6 +3,7 @@ import {
   HttpException,
   Inject,
   Injectable,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { existsSync } from 'node:fs';
@@ -153,6 +154,34 @@ export class FastkeyService {
       status: 'success',
       fastkeys,
     };
+  }
+
+  async getByStore(storeId: string, userId: string | undefined, origin: string) {
+    if (!userId) throw new UnauthorizedException('Authentication is required');
+    const db = this.merchants.requireDataSource();
+    if (!(await db.getRepository(StoreEntity).existsBy({ id: storeId }))) {
+      throw new NotFoundException('Store not found');
+    }
+    const rows = await db.getRepository(StoreEmployeeFastkeyEntity).find({
+      where: { storeId, isDeleted: false },
+      order: { createdAt: 'ASC', id: 'ASC' },
+    });
+    const fastkeys = await Promise.all(rows
+      .sort((left, right) => this.fastkeyIndex(left) - this.fastkeyIndex(right))
+      .map(async row => {
+        const assignments = this.productAssignments(row);
+        return {
+          fastkey_id: row.id,
+          fastkey_title: String(row.json?.fastkey_title ?? ''),
+          fastkey_image: row.fastkeyImage?.trim() || origin + '/uploads/fastkeys/no-image.png',
+          itemCount: assignments.length,
+          user_id: row.employeeId,
+          store_id: row.storeId,
+          fastkey_index: this.fastkeyIndex(row),
+          products: await this.enhanceProducts(row.storeId, assignments),
+        };
+      }));
+    return { status: 'success', message: 'FastKeys retrieved successfully', store_id: storeId, count: fastkeys.length, fastkeys };
   }
 
   async getAllFastkeyImages(userId: string | undefined, origin: string) {
