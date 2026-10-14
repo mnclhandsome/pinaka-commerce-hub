@@ -16,6 +16,9 @@ async function bootstrap() {
   });
   app.useBodyParser('json', {
     limit: '3mb',
+    verify: (req: { rawBody?: Buffer }, _res: unknown, buffer: Buffer) => {
+      req.rawBody = Buffer.from(buffer);
+    },
     type: [
       'application/json',
       'application/*+json',
