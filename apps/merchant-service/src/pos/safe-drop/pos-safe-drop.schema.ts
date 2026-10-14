@@ -123,6 +123,10 @@ export async function ensurePosSafeDropSchema(db: DataSource): Promise<void> {
       )
     `);
     await manager.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS pos_safe_drop_settings_id_uidx
+      ON public.pos_safe_drop_settings (id)
+    `);
+    await manager.query(`
       DO $$ BEGIN
         IF NOT EXISTS (
           SELECT 1 FROM pg_constraint WHERE contype = 'f'

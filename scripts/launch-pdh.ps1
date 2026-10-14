@@ -101,11 +101,23 @@ SELECT 'CREATE DATABASE pinaka_commerce_hub' WHERE NOT EXISTS (SELECT FROM pg_da
         Write-Host "$($service.Name): ready on $($service.Port) (PID $($started.Id))."
     }
     $pgAdminListening = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object LocalPort -eq 5050).Count -gt 0
+    if (-not $pgAdminListening) {
+        $pythonExe = 'C:\Program Files\PostgreSQL\18\pgAdmin 4\python\python.exe'
+        $pgAdminPy = 'C:\Program Files\PostgreSQL\18\pgAdmin 4\web\pgAdmin4.py'
+        if ((Test-Path -LiteralPath $pythonExe) -and (Test-Path -LiteralPath $pgAdminPy)) {
+            Write-Host 'Starting pgAdmin 4 Web Server on port 5050...'
+            Start-Process -FilePath "powershell.exe" -ArgumentList @('-WindowStyle', 'Hidden', '-Command', "`$env:PATH = 'C:\Program Files\PostgreSQL\18\pgAdmin 4\runtime;C:\Program Files\PostgreSQL\18\bin;' + `$env:PATH; `$env:PGADMIN_INT_PORT = '5050'; Remove-Item env:PGADMIN_INT_KEY -ErrorAction SilentlyContinue; & '$pythonExe' -s '$pgAdminPy'") -WindowStyle Hidden
+            for ($attempt = 1; $attempt -le 15; $attempt++) {
+                Start-Sleep -Seconds 1
+                $pgAdminListening = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object LocalPort -eq 5050).Count -gt 0
+                if ($pgAdminListening) { break }
+            }
+        }
+    }
     if ($pgAdminListening) {
-        Write-Host 'pgAdmin Web: http://localhost:5050 (Credentials: pdh_admin@pinakacommerce.com / pdh_password)'
+        Write-Host '🐘 pgAdmin 4: http://localhost:5050 (Direct browser access enabled)'
     } else {
         Write-Host 'PostgreSQL: Native Windows Service (postgresql-x64-18) running on port 5432.'
-        Write-Host 'pgAdmin 4: Open native Desktop App from Start Menu or launch: C:\Program Files\PostgreSQL\18\pgAdmin 4\runtime\pgAdmin4.exe'
     }
     Write-Host 'React: http://localhost:5173 (start npm run dev in pinaka-commerce-hub-web).'
     Write-Host 'Re-running this command reuses existing services. Add -Restart to reload backend services.'

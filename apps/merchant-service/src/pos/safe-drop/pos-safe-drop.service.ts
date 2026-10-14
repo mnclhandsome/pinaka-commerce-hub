@@ -1,70 +1,148 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { MerchantRepository } from '../../modules/merchant/merchant.repository';
-import { FileStorageService } from '../../modules/file-storage/file-storage.service';
-import { PosSafeDropEntity } from './pos-safe-drop.entity';
-import { PosSafeDropTubeEntity } from './pos-safe-drop-tube.entity';
-import { PosSafeDropDenominationEntity } from './pos-safe-drop-denomination.entity';
-import { PosSafeDropDenominationDto, SavePosSafeDropDto } from './pos-safe-drop.dto';
+import { StorePosConfigurationEntity } from '../../entities/store-pos-configuration.entity';
+import { SavePosSafeDropDto } from './pos-safe-drop.dto';
 
-type ImageScope = { merchantName: string; storeName: string };
+const imagePattern = /^data:image\/(png|jpeg|jpg|webp);base64,/i;
 
 export interface PosSafeDropRecord {
   id: string;
-  storeId: string;
-  merchantId: string;
+  store_id: string;
+  merchant_id: string;
   enabled: boolean;
-  primarySafe: string;
-  dropEnabled: boolean;
+  primary_safe: string;
+  drop_enabled: boolean;
   threshold: number | null;
   minimum: number | null;
   maximum: number | null;
-  managerApproval: boolean;
-  cashierInitiated: boolean;
-  reasonRequired: boolean;
-  tubeSize: number | null;
+  manager_approval: boolean;
+  cashier_initiated: boolean;
+  reason_required: boolean;
+  tube_size: number | null;
   tubes: Array<{ id: string; amount: number; quantity: number }>;
-  drops: Array<{ id: string; amount: number; imageName: string; imageData: string }>;
-  createdAt: Date;
-  updatedAt: Date;
+  drops: Array<{ id: string; amount: number; image_name: string; image_data: string }>;
+  created_at: Date;
+  updated_at: Date;
 }
+
+type AuthenticatedActor = {
+  id?: string;
+  accountId?: string;
+  merchantId?: string;
+  storeId?: string;
+} | undefined;
 
 @Injectable()
 export class PosSafeDropService {
-  constructor(
-    @Inject(MerchantRepository) private readonly merchants: MerchantRepository,
-    @Inject(FileStorageService) private readonly files: FileStorageService,
-  ) {}
+  constructor(@Inject(MerchantRepository) private readonly merchants: MerchantRepository) {}
 
-  async get(storeId: string): Promise<{ success: true; safeDrop: PosSafeDropRecord }> {
+  async get(storeId: string): Promise<{ success: true; safe_drop: PosSafeDropRecord }> {
     const store = await this.requireStore(storeId);
-    const record = await this.findByStore(store.id);
+    const record = await this.findConfiguration(store.id);
     if (!record) throw new NotFoundException('Safe and safe drop settings are not configured for this store');
-    return { success: true, safeDrop: await this.withChildren(record) };
+    return { success: true, safe_drop: this.present(record, store.id, store.merchantId) };
+  }
+
+  async getStatus(storeId: string, actor: AuthenticatedActor) {
+    if (!actor?.id) throw new ForbiddenException('Authenticated user is required');
+    const store = await this.requireStore(storeId);
+    if (actor.storeId && actor.storeId !== store.id) {
+      throw new ForbiddenException('Store does not belong to the authenticated session');
+    }
+    if (actor.merchantId && actor.merchantId !== store.merchantId) {
+      throw new ForbiddenException('Store does not belong to the authenticated merchant');
+    }
+
+    if (!actor.storeId && actor.merchantId !== store.merchantId) {
+      const membership = await this.merchants.requireDataSource().query(
+        `SELECT 1
+           FROM public.merchants m
+          WHERE m.id::text = $1
+            AND (
+              NULLIF(to_jsonb(m)->>'created_by', '') = $2
+              OR EXISTS (
+                SELECT 1 FROM public.employees e
+                 WHERE e.merchant_id::text = m.id::text
+                   AND (e.id::text = $2 OR e.user_id::text = $2)
+              )
+              OR EXISTS (
+                SELECT 1 FROM public.users u
+                 WHERE u.id::text = $2
+                   AND u."accountId"::text = $3
+                   AND lower(u.email) = lower(m.email)
+              )
+            )
+          LIMIT 1`,
+        [store.merchantId, actor.id, actor.accountId ?? null],
+      );
+      if (!membership.length) {
+        throw new ForbiddenException('Store does not belong to the authenticated merchant');
+      }
+    }
+
+    const configRow = await this.findConfiguration(store.id);
+    const config = configRow?.configurationValue;
+    const readFlag = (value: unknown): boolean | null => {
+      if (value === true || value === 1 || value === '1' || value === 'true' || value === 'yes') {
+        return true;
+      }
+      if (value === false || value === 0 || value === '0' || value === 'false' || value === 'no') {
+        return false;
+      }
+      return null;
+    };
+    const configuredFlag = (keys: string[]) => {
+      for (const key of keys) {
+        if (config?.[key] !== undefined && config[key] !== null) {
+          return readFlag(config[key]);
+        }
+      }
+      return null;
+    };
+    // The PCH configuration screen stores these canonical keys. Keep them
+    // ahead of legacy aliases so an old alias cannot mask the saved setting.
+    const safeEnabled = configuredFlag(['enabled', 'safe_enabled', 'safeEnabled']);
+    const safeDropEnabled = configuredFlag([
+      'dropEnabled',
+      'safe_drop_enabled',
+      'safeDropEnabled',
+      'drop_enabled',
+    ]);
+    return {
+      success: true,
+      store_id: store.id,
+      data: {
+        safe_enabled: safeEnabled ?? false,
+        safe_drop_enabled: safeDropEnabled ?? false,
+      },
+    };
   }
 
   async create(storeId: string, body: SavePosSafeDropDto) {
     const store = await this.requireStore(storeId);
-    const scope = await this.imageScope(store);
-    this.assertRules(body, scope);
-    if (await this.findByStore(store.id)) {
+    this.assertRules(body);
+    if (await this.findConfiguration(store.id)) {
       throw new ConflictException('Safe and safe drop settings already exist for this store');
     }
-    return { success: true, safeDrop: await this.write(store, scope, body, null) };
+    const record = await this.saveConfiguration(store.id, body);
+    return { success: true, safe_drop: this.present(record, store.id, store.merchantId) };
   }
 
   async update(storeId: string, body: SavePosSafeDropDto) {
     const store = await this.requireStore(storeId);
-    const scope = await this.imageScope(store);
-    this.assertRules(body, scope);
-    const current = await this.findByStore(store.id);
+    this.assertRules(body);
+    const current = await this.findConfiguration(store.id);
     if (!current) throw new NotFoundException('Safe and safe drop settings are not configured for this store');
-    return { success: true, safeDrop: await this.write(store, scope, body, current.id) };
+    const record = await this.saveConfiguration(store.id, body, current);
+    return { success: true, safe_drop: this.present(record, store.id, store.merchantId) };
   }
 
   private async requireStore(storeId: string) {
@@ -73,7 +151,7 @@ export class PosSafeDropService {
     return store;
   }
 
-  private assertRules(body: SavePosSafeDropDto, scope: ImageScope) {
+  private assertRules(body: SavePosSafeDropDto) {
     if (body.enabled && !body.primarySafe?.trim()) {
       throw new BadRequestException('Enter a primary safe');
     }
@@ -87,19 +165,19 @@ export class PosSafeDropService {
     };
     unique((body.tubes || []).map(item => Number(item.amount)), 'Tube denomination');
     unique((body.drops || []).map(item => Number(item.amount)), 'Safe-drop denomination');
-    const accepted = (value: string) =>
-      this.files.isDataImage(value) || this.files.isWithinDirectory(value, scope);
-    if ((body.drops || []).some(item => !accepted(item.imageData || ''))) {
-      throw new BadRequestException('Each safe-drop image must be a PNG, JPG, or WEBP data URL or an upload URL for this store');
+    if ((body.drops || []).some(item => !imagePattern.test(item.imageData || ''))) {
+      throw new BadRequestException('Each safe-drop image must be a PNG, JPG, or WEBP data URL');
     }
   }
 
-  private repo() {
-    return this.merchants.requireDataSource().getRepository(PosSafeDropEntity);
+  private configurationRepository() {
+    return this.merchants.requireDataSource().getRepository(StorePosConfigurationEntity);
   }
 
-  private async findByStore(storeId: string) {
-    return this.repo().findOne({ where: { storeId } });
+  private findConfiguration(storeId: string) {
+    return this.configurationRepository().findOne({
+      where: { storeId, configurationName: 'safe_and_safe_drop' },
+    });
   }
 
   private money(value: number | undefined) {
@@ -107,159 +185,84 @@ export class PosSafeDropService {
     return !Number.isFinite(amount) || amount <= 0 ? null : String(amount);
   }
 
-  private async write(
-    store: { id: string; merchantId: string; storeName: string },
-    scope: ImageScope,
+  private boolean(value: unknown): boolean {
+    return value === true || value === 1 || value === '1' || value === 'true' || value === 'yes';
+  }
+
+  private async saveConfiguration(
+    storeId: string,
     body: SavePosSafeDropDto,
-    existingId: string | null,
-  ): Promise<PosSafeDropRecord> {
-    const previous = existingId ? await this.findDrops(existingId) : [];
-    const written: string[] = [];
-    const drops: PosSafeDropDenominationDto[] = [];
-    for (const item of body.drops || []) {
-      const created = this.files.isDataImage(item.imageData);
-      const imageData = await this.files.storeImageData({
-        merchantName: scope.merchantName,
-        storeName: scope.storeName,
-        imageName: item.imageName,
-        imageData: item.imageData,
-      });
-      if (created) written.push(imageData);
-      drops.push({ ...item, imageData });
-    }
-    try {
-      const db = this.merchants.requireDataSource();
-      const record = await db.transaction(async manager => {
-        const settings = manager.getRepository(PosSafeDropEntity);
-        const tubes = manager.getRepository(PosSafeDropTubeEntity);
-        const dropRepo = manager.getRepository(PosSafeDropDenominationEntity);
-        const fields = {
-          storeId: store.id,
-          merchantId: store.merchantId,
-          enabled: body.enabled,
-          primarySafe: body.primarySafe.trim(),
-          dropEnabled: body.enabled && body.dropEnabled,
-          threshold: this.money(body.threshold),
-          minimum: this.money(body.minimum),
-          maximum: this.money(body.maximum),
-          managerApproval: body.managerApproval,
-          cashierInitiated: body.cashierInitiated,
-          reasonRequired: body.reasonRequired,
-          tubeSize: body.tubeSize ?? null,
-        };
-        const row = existingId
-          ? await settings.save({ id: existingId, ...fields })
-          : await settings.save(settings.create(fields));
-
-        await tubes.delete({ safeDropId: row.id });
-        await dropRepo.delete({ safeDropId: row.id });
-        const savedTubes = (body.tubes || []).length
-          ? await tubes.save(body.tubes.map((item, index) => tubes.create({
-              ...(item.id ? { id: item.id } : {}),
-              safeDropId: row.id,
-              amount: String(item.amount),
-              quantity: item.quantity,
-              sortOrder: index,
-            })))
-          : [];
-        const savedDrops = drops.length
-          ? await dropRepo.save(drops.map((item, index) => dropRepo.create({
-              ...(item.id ? { id: item.id } : {}),
-              safeDropId: row.id,
-              amount: String(item.amount),
-              imageName: item.imageName.trim() || 'denomination',
-              imageData: item.imageData,
-              sortOrder: index,
-            })))
-          : [];
-        return this.present(row, savedTubes, savedDrops);
-      });
-      const kept = new Set(drops.map(item => item.imageData));
-      for (const item of previous) {
-        if (!kept.has(item.imageData)) await this.files.removeStoredFile(item.imageData, scope);
-      }
-      return record;
-    } catch (error) {
-      for (const url of written) await this.files.removeStoredFile(url, scope);
-      throw error;
-    }
-  }
-
-  private async imageScope(store: { merchantId: string; storeName: string }): Promise<ImageScope> {
-    const { merchant } = await this.merchants.getMerchantById(store.merchantId);
-    if (!merchant) throw new NotFoundException('Merchant not found');
-    return {
-      merchantName: merchant.businessDisplayName || merchant.merchantCode || merchant.merchantId || 'merchant',
-      storeName: store.storeName || 'store',
-    };
-  }
-
-  private async findDrops(safeDropId: string) {
-    return this.merchants.requireDataSource().getRepository(PosSafeDropDenominationEntity).find({
-      where: { safeDropId },
-      order: { sortOrder: 'ASC' },
-    });
-  }
-
-  private async withChildren(record: PosSafeDropEntity): Promise<PosSafeDropRecord> {
-    const db = this.merchants.requireDataSource();
-    const tubes = await db.getRepository(PosSafeDropTubeEntity).find({
-      where: { safeDropId: record.id },
-      order: { sortOrder: 'ASC' },
-    });
-    const drops = await this.findDrops(record.id);
-    await this.materializeImages(record, drops);
-    return this.present(record, tubes, drops);
-  }
-
-  private async materializeImages(
-    record: PosSafeDropEntity,
-    drops: PosSafeDropDenominationEntity[],
+    existing?: StorePosConfigurationEntity,
   ) {
-    const pending = drops.filter(item => this.files.isDataImage(item.imageData));
-    if (!pending.length) return;
-    const store = await this.requireStore(record.storeId);
-    const scope = await this.imageScope(store);
-    for (const item of pending) {
-      item.imageData = await this.files.storeImageData({
-        merchantName: scope.merchantName,
-        storeName: scope.storeName,
-        imageName: item.imageName,
+    const repository = this.configurationRepository();
+    const previous = existing?.configurationValue ?? {};
+    const configurationValue: Record<string, unknown> = {
+      ...previous,
+      enabled: body.enabled,
+      primarySafe: body.primarySafe.trim(),
+      dropEnabled: body.enabled && body.dropEnabled,
+      threshold: this.money(body.threshold),
+      minimum: this.money(body.minimum),
+      maximum: this.money(body.maximum),
+      managerApproval: body.managerApproval,
+      cashierInitiated: body.cashierInitiated,
+      reasonRequired: body.reasonRequired,
+      tubeSize: body.tubeSize ?? null,
+      tubes: (body.tubes || []).map(item => ({
+        id: item.id ?? randomUUID(),
+        amount: Number(item.amount),
+        quantity: item.quantity,
+      })),
+      drops: (body.drops || []).map(item => ({
+        id: item.id ?? randomUUID(),
+        amount: Number(item.amount),
+        imageName: item.imageName.trim() || 'denomination',
         imageData: item.imageData,
-      });
-    }
-    await this.merchants.requireDataSource().getRepository(PosSafeDropDenominationEntity).save(pending);
+      })),
+    };
+    const configuration = existing ?? repository.create({
+      storeId,
+      configurationName: 'safe_and_safe_drop',
+      configurationValue,
+    });
+    configuration.configurationValue = configurationValue;
+    return repository.save(configuration);
   }
 
   private present(
-    record: PosSafeDropEntity,
-    tubes: PosSafeDropTubeEntity[],
-    drops: PosSafeDropDenominationEntity[],
+    record: StorePosConfigurationEntity,
+    storeId: string,
+    merchantId: string,
   ): PosSafeDropRecord {
-    const amount = (value: string | null) => value === null || value === undefined ? null : Number(value);
+    const value = record.configurationValue ?? {};
+    const numberOrNull = (item: unknown) => item === null || item === undefined ? null : Number(item);
     return {
       id: record.id,
-      storeId: record.storeId,
-      merchantId: record.merchantId,
-      enabled: record.enabled,
-      primarySafe: record.primarySafe,
-      dropEnabled: record.dropEnabled,
-      threshold: amount(record.threshold),
-      minimum: amount(record.minimum),
-      maximum: amount(record.maximum),
-      managerApproval: record.managerApproval,
-      cashierInitiated: record.cashierInitiated,
-      reasonRequired: record.reasonRequired,
-      tubeSize: record.tubeSize,
-      tubes: tubes.map(item => ({ id: item.id, amount: Number(item.amount), quantity: item.quantity })),
-      drops: drops.map(item => ({
-        id: item.id,
+      store_id: storeId,
+      merchant_id: merchantId,
+      enabled: this.boolean(value.enabled ?? value.safe_enabled ?? value.safeEnabled),
+      primary_safe: String(value.primarySafe ?? value.primary_safe ?? ''),
+      drop_enabled: this.boolean(value.dropEnabled ?? value.safe_drop_enabled ?? value.drop_enabled),
+      threshold: numberOrNull(value.threshold),
+      minimum: numberOrNull(value.minimum),
+      maximum: numberOrNull(value.maximum),
+      manager_approval: this.boolean(value.managerApproval ?? value.manager_approval),
+      cashier_initiated: this.boolean(value.cashierInitiated ?? value.cashier_initiated),
+      reason_required: this.boolean(value.reasonRequired ?? value.reason_required),
+      tube_size: numberOrNull(value.tubeSize ?? value.tube_size),
+      tubes: Array.isArray(value.tubes) ? value.tubes.map((item: any) => ({
+        id: String(item.id ?? randomUUID()),
         amount: Number(item.amount),
-        imageName: item.imageName,
-        imageData: item.imageData,
-      })),
-      createdAt: record.createdAt,
-      updatedAt: record.updatedAt,
+        quantity: Number(item.quantity),
+      })) : [],
+      drops: Array.isArray(value.drops) ? value.drops.map((item: any) => ({
+        id: String(item.id ?? randomUUID()),
+        amount: Number(item.amount),
+        image_name: String(item.imageName ?? item.image_name ?? ''),
+        image_data: String(item.imageData ?? item.image_data ?? ''),
+      })) : [],
+      created_at: record.createdAt,
+      updated_at: record.updatedAt,
     };
   }
 }

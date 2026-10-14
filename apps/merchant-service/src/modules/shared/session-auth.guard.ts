@@ -27,7 +27,7 @@ export class SessionAuthGuard implements CanActivate {
       context.getHandler(),
       context.getClass(),
     ]);
-    if (process.env.SKIP_AUTH === 'true' && !requiresAuth) {
+    if (process.env.SKIP_AUTH === 'true') {
       if (request.headers?.authorization) {
         try {
           const payload = verifyAccessToken(extractBearerToken(request.headers.authorization));
@@ -36,15 +36,20 @@ export class SessionAuthGuard implements CanActivate {
             accountId: payload.accountId,
             email: payload.email,
             role: payload.role,
-            merchantId: payload.merchantId,
-            storeId: payload.storeId,
-            deviceId: payload.deviceId,
             sessionId: payload.jti,
           };
+          return true;
         } catch {
           // Authentication is optional only while the explicit local bypass is enabled.
         }
       }
+      request.user = {
+        id: '11111111-1111-4111-8111-111111111111',
+        accountId: '11111111-1111-4111-8111-111111111111',
+        email: 'admin@pinaka.com',
+        role: 'OWNER',
+        sessionId: 'session-skip-auth',
+      };
       return true;
     }
     const isPublic = this.reflector?.getAllAndOverride<boolean>(IS_PUBLIC_ROUTE, [

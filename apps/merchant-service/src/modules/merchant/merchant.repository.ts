@@ -6,15 +6,14 @@ import * as crypto from 'crypto';
 import {
   BadRequestException,
   ConflictException,
-  Inject,
   Injectable,
+  Inject,
   InternalServerErrorException,
   NotFoundException,
   OnModuleInit,
   Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { FileStorageService } from '../file-storage/file-storage.service';
 import { FeatureEntity, FeatureStatus } from '../../entities/feature.entity';
 import {
   PermissionEntity,
@@ -137,7 +136,9 @@ import { ensureStoreDevicesSchema } from '../store-pos-configuration/device-mapp
 import { ensureVendorStoreSchema } from '../dynamic-query/vendor-store.schema';
 import { ensureStorePosConfigurationSchema } from '../store-pos-configuration/store-pos-configuration.schema';
 import { StorePosConfigurationEntity } from '../../entities/store-pos-configuration.entity';
+import { PosEmployeeAttendanceEntity } from '../../entities/pos-employee-attendance.entity';
 import { ensureMerchantDevicesSchema } from '../device/device.schema';
+import { FileStorageService } from '../file-storage/file-storage.service';
 
 interface WordPressProductNode {
   id?: number;
@@ -162,6 +163,15 @@ interface WordPressCategoryNode {
   children?: WordPressCategoryNode[];
 }
 
+interface StoreProductTaxConfiguration {
+  currency: string;
+  decimalPlaces: number;
+  taxEnabled: boolean;
+  defaultTaxRate: number | null;
+  taxCalculation: string;
+  taxClasses: Array<{ name: string; rate: number }>;
+}
+
 /** `required` is optional on older mapping rows. */
 const mappingRequired = `COALESCE((to_jsonb(mapping)->>'required')::boolean, false)`;
 
@@ -170,7 +180,7 @@ export class MerchantRepository implements OnModuleInit {
   constructor(
     @Optional()
     @Inject(FileStorageService)
-    private readonly fileStorage?: FileStorageService,
+    private readonly files?: FileStorageService,
   ) {}
 
   async getSubscribedFeatures(merchantId: string, storeTypeId: string) {
@@ -739,6 +749,7 @@ export class MerchantRepository implements OnModuleInit {
         PosTerminalMappingSettingsEntity,
         PosTerminalMappingEntity,
         StorePosConfigurationEntity,
+        PosEmployeeAttendanceEntity,
         StoreEmployeeFastkeyEntity,
         SessionEntity,
         VendorEntity,
@@ -1096,12 +1107,7 @@ export class MerchantRepository implements OnModuleInit {
             subscriptionId: subscription?.id,
           },
         });
-        return {
-          merchant,
-          stores: savedStores,
-          subscription,
-          previousMerchantName: existing?.businessDisplayName ?? null,
-        };
+        return { merchant, stores: savedStores, subscription };
       });
     } catch (error: any) {
       if ((error.driverError?.code || error.code) === '23505')
@@ -1112,72 +1118,18 @@ export class MerchantRepository implements OnModuleInit {
     }
     for (const store of result.stores)
       await this.cacheStorePin(store.activationPin, store);
-    await this.syncStorageFolders(
-      result.merchant,
-      result.stores,
-      result.previousMerchantName,
-    );
-    return {
-      merchant: result.merchant,
-      stores: result.stores,
-      subscription: result.subscription,
-    };
-  }
-
-  private merchantLabel(merchant: {
-    businessDisplayName?: string | null;
-    merchantCode?: string | null;
-    merchantId?: string | null;
-  }): string {
-    return (
-      merchant.businessDisplayName?.trim() ||
-      merchant.merchantCode?.trim() ||
-      merchant.merchantId?.trim() ||
-      'merchant'
-    );
-  }
-
-  private async syncStorageFolders(
-    merchant: {
-      businessDisplayName?: string | null;
-      merchantCode?: string | null;
-      merchantId?: string | null;
-    },
-    stores: Array<{ storeName?: string | null }>,
-    previousMerchantName?: string | null,
-  ): Promise<void> {
-    if (!this.fileStorage) return;
-    const nextName = this.merchantLabel(merchant);
-    const previous = previousMerchantName?.trim();
-    if (previous && previous !== (merchant.businessDisplayName || '').trim()) {
-      await this.fileStorage.renameMerchantFolder(previous, nextName);
-    } else {
-      await this.fileStorage.ensureMerchantFolder(nextName);
-    }
-    for (const store of stores) {
-      if (store.storeName?.trim()) {
-        await this.fileStorage.ensureStoreFolder(nextName, store.storeName);
+    if (this.files) {
+      const merchantLabel =
+        result.merchant.businessDisplayName ||
+        result.merchant.merchantCode ||
+        result.merchant.merchantId ||
+        'merchant';
+      await this.files.ensureMerchantFolder(merchantLabel);
+      for (const store of result.stores) {
+        await this.files.ensureStoreFolder(merchantLabel, store.storeName);
       }
     }
-  }
-
-  private async provisionStoreFolder(
-    merchantUuid: string,
-    storeName: string,
-    previousStoreName?: string | null,
-  ): Promise<void> {
-    if (!this.fileStorage || !this.merchantRepo || !storeName?.trim()) return;
-    const merchant = await this.merchantRepo.findOne({
-      where: { id: merchantUuid },
-    });
-    if (!merchant) return;
-    const merchantName = this.merchantLabel(merchant);
-    const previous = previousStoreName?.trim();
-    if (previous && previous !== storeName.trim()) {
-      await this.fileStorage.renameStoreFolder(merchantName, previous, storeName);
-      return;
-    }
-    await this.fileStorage.ensureStoreFolder(merchantName, storeName);
+    return result;
   }
 
   async createMerchant(
@@ -1232,7 +1184,9 @@ export class MerchantRepository implements OnModuleInit {
       saved.email,
       { businessName: saved.businessName },
     );
-    await this.syncStorageFolders(saved, []);
+    await this.files?.ensureMerchantFolder(
+      saved.businessDisplayName || saved.merchantCode || saved.merchantId || 'merchant',
+    );
     return saved;
   }
 
@@ -1249,7 +1203,6 @@ export class MerchantRepository implements OnModuleInit {
       order: { createdAt: 'DESC' },
     });
     if (!merchant) return null;
-    const previousName = merchant.businessDisplayName;
     Object.assign(merchant, data, {
       id: merchant.id,
       merchantId: merchant.merchantId,
@@ -1259,7 +1212,6 @@ export class MerchantRepository implements OnModuleInit {
     await this.recordAuditLog('MERCHANT_UPDATED', id, undefined, saved.email, {
       businessName: saved.businessName,
     });
-    await this.syncStorageFolders(saved, [], previousName);
     return saved;
   }
 
@@ -1325,6 +1277,32 @@ export class MerchantRepository implements OnModuleInit {
       ),
     ];
     return { merchantId: row.merchantId, merchantUuid: row.uuid, aliases };
+  }
+
+  private async merchantFolderLabel(merchantId: string): Promise<string> {
+    try {
+      const rows = await this.dataSource.query(
+        `SELECT to_jsonb(m) AS data
+         FROM public.merchants m
+         WHERE m.id::text = $1
+            OR m.merchant_id = $1
+            OR m.merchant_code = $1
+         LIMIT 1`,
+        [merchantId],
+      );
+      const data = (rows[0]?.data ?? {}) as Record<string, unknown>;
+      return String(
+        data.business_display_name ||
+          data.businessDisplayName ||
+          data.businessName ||
+          data.merchantName ||
+          data.merchant_code ||
+          data.merchantCode ||
+          merchantId,
+      );
+    } catch {
+      return merchantId;
+    }
   }
 
   async storeMatchesMerchant(
@@ -1462,7 +1440,10 @@ export class MerchantRepository implements OnModuleInit {
       'merchant',
       { storeName: entity.storeName, pin: activationPin },
     );
-    await this.provisionStoreFolder(identity.merchantUuid, entity.storeName);
+    await this.files?.ensureStoreFolder(
+      await this.merchantFolderLabel(identity.merchantUuid),
+      entity.storeName,
+    );
     return entity;
   }
 
@@ -1516,7 +1497,10 @@ export class MerchantRepository implements OnModuleInit {
         'merchant',
         { storeName: store.storeName },
       );
-      await this.provisionStoreFolder(identity.merchantUuid, store.storeName);
+      await this.files?.ensureStoreFolder(
+        await this.merchantFolderLabel(identity.merchantUuid),
+        store.storeName,
+      );
     }
     return stores;
   }
@@ -1535,7 +1519,6 @@ export class MerchantRepository implements OnModuleInit {
       if (existing) {
         if (!(await this.storeMatchesMerchant(existing, identity.merchantId)))
           throw new Error(`Store ID '${data.id}' belongs to another merchant`);
-        const previousStoreName = existing.storeName;
         Object.assign(existing, data, {
           merchantId: identity.merchantUuid,
           updatedAt: new Date(),
@@ -1547,11 +1530,6 @@ export class MerchantRepository implements OnModuleInit {
           saved.id,
           'merchant',
           { storeName: saved.storeName },
-        );
-        await this.provisionStoreFolder(
-          identity.merchantUuid,
-          saved.storeName,
-          previousStoreName,
         );
         return saved;
       }
@@ -1578,8 +1556,8 @@ export class MerchantRepository implements OnModuleInit {
     serialNumber: string;
     status?: string;
     createdAt?: Date;
-    createdBy: string;
-    updatedBy: string;
+    createdBy?: string;
+    updatedBy?: string;
   }): Promise<DeviceEntity> {
     if (!this.deviceRepo) {
       throw new ServiceUnavailableException('Database not connected');
@@ -1753,7 +1731,6 @@ export class MerchantRepository implements OnModuleInit {
   ): Promise<StoreEntity | null> {
     const store = await this.getStoreById(id);
     if (!store) return null;
-    const previousStoreName = store.storeName;
     const { id: _ignoredId, merchantId: _ignoredMerchantId, ...safeFields } =
       fields;
     const updated = {
@@ -1779,11 +1756,6 @@ export class MerchantRepository implements OnModuleInit {
       store.id,
       'merchant',
       { storeName: updated.storeName },
-    );
-    await this.provisionStoreFolder(
-      store.merchantId,
-      updated.storeName,
-      previousStoreName,
     );
     return updated;
   }
@@ -1984,8 +1956,8 @@ export class MerchantRepository implements OnModuleInit {
               es.id AS "employeeStoreId",
               es.store_id AS "storeId",
               es.status AS "assignmentStatus",
-              (es.login_pin_hash IS NOT NULL) AS "pinSet",
-              es.login_pin AS "loginPin",
+              (COALESCE(es.login_pin_hash, e.login_pin_hash) IS NOT NULL) AS "pinSet",
+              COALESCE(es.login_pin, e.login_pin) AS "loginPin",
               r.id AS "roleId",
               r.name AS "roleName",
               r.source_role_template_id AS "roleTemplateId"
@@ -2030,13 +2002,14 @@ export class MerchantRepository implements OnModuleInit {
       );
     const keepIds: string[] = [];
     for (const item of employees) {
+      const empIdParam = item.employee_id || (item as any).employeeId;
       const [employee] = await this.dataSource.query(
         `SELECT id, login_pin AS "loginPin",
                 login_pin_hash AS "loginPinHash"
          FROM public.employees
          WHERE merchant_id = $2::uuid AND (id::text = $1 OR employee_code = $1)
          LIMIT 1`,
-        [item.employee_id, merchantUuid],
+        [empIdParam, merchantUuid],
       );
       if (!employee)
         throw new BadRequestException(
@@ -3600,7 +3573,7 @@ export class MerchantRepository implements OnModuleInit {
     if (!/^\d+$/.test(categoryKey)) {
       throw new BadRequestException('categoryId must be a number');
     }
-    const [productRows, categoryRows] = await Promise.all([
+    const [productRows, categoryRows, taxConfiguration] = await Promise.all([
       this.dataSource.query(
         `SELECT COALESCE(jsonb_agg(product), '[]'::jsonb) AS products
          FROM public.store_products AS catalog
@@ -3650,24 +3623,27 @@ export class MerchantRepository implements OnModuleInit {
         if (code === '42P01' || code === '42703') return [];
         throw error;
       }),
+      this.getStoreProductTaxConfiguration(storeId),
     ]);
     const products = productRows[0]?.products;
     if (!Array.isArray(products) || products.length === 0) return null;
     const category = this.asRecord(categoryRows[0]?.category);
     return products.map((product) =>
-      this.presentWooProduct(this.asRecord(product) ?? {}, category),
+      this.presentWooProduct(this.asRecord(product) ?? {}, category, taxConfiguration),
     );
   }
 
   private presentWooProduct(
     product: Record<string, unknown>,
     category: Record<string, unknown> | null,
+    taxConfiguration: StoreProductTaxConfiguration | null = null,
   ): Record<string, unknown> {
     const value = (key: string): unknown =>
       Object.prototype.hasOwnProperty.call(product, key) && product[key] !== undefined
         ? product[key]
         : null;
     const dimensions = this.asRecord(product.dimensions);
+    const tax = this.productTax(product, category, taxConfiguration);
     return {
       id: this.numberOrNull(product.id),
       name: value('name'),
@@ -3703,6 +3679,13 @@ export class MerchantRepository implements OnModuleInit {
       button_text: value('button_text'),
       tax_status: value('tax_status'),
       tax_class: value('tax_class'),
+      tax_applicable: tax.applicable,
+      tax_rate: tax.rate,
+      tax_amount: tax.amount,
+      price_including_tax: tax.priceIncludingTax,
+      tax_class_details: tax.taxClass,
+      tax_calculation: taxConfiguration?.taxCalculation ?? null,
+      currency: taxConfiguration?.currency ?? null,
       manage_stock: value('manage_stock'),
       stock_quantity: value('stock_quantity'),
       backorders: value('backorders'),
@@ -3747,6 +3730,103 @@ export class MerchantRepository implements OnModuleInit {
       global_unique_id: value('global_unique_id'),
       _links: value('_links'),
     };
+  }
+
+  private async getStoreProductTaxConfiguration(
+    storeId: string,
+  ): Promise<StoreProductTaxConfiguration | null> {
+    const settings = await this.dataSource.getRepository(PosCurrencyTaxEntity).findOne({ where: { storeId } });
+    if (settings) {
+      const classes = await this.dataSource.getRepository(PosTaxClassEntity).find({
+        where: { currencyTaxId: settings.id },
+        order: { sortOrder: 'ASC' },
+      });
+      return {
+        currency: settings.currency,
+        decimalPlaces: Number(settings.decimalPlaces),
+        taxEnabled: settings.taxEnabled,
+        defaultTaxRate: settings.defaultTaxRate === null ? null : Number(settings.defaultTaxRate),
+        taxCalculation: settings.taxCalculation,
+        taxClasses: classes.map((taxClass) => ({ name: taxClass.name, rate: Number(taxClass.rate) })),
+      };
+    }
+
+    const legacy = await this.dataSource.getRepository(StorePosConfigurationEntity).findOne({
+      where: { storeId, configurationName: 'currency_taxes' },
+    });
+    if (!legacy) return null;
+    const value = legacy.configurationValue;
+    const taxClasses = Array.isArray(value.taxClasses)
+      ? value.taxClasses.flatMap((item) => {
+          const taxClass = this.asRecord(item);
+          const name = this.textOrNull(taxClass?.name);
+          const rate = this.numberOrNull(taxClass?.rate);
+          return name && rate !== null ? [{ name, rate }] : [];
+        })
+      : [];
+    return {
+      currency: this.textOrNull(value.currency) ?? 'USD',
+      decimalPlaces: this.numberOrNull(value.decimalPlaces) ?? 2,
+      taxEnabled: value.taxEnabled !== false,
+      defaultTaxRate: this.numberOrNull(value.defaultTaxRate),
+      taxCalculation: this.textOrNull(value.taxCalculation) ?? 'item-price',
+      taxClasses,
+    };
+  }
+
+  private productTax(
+    product: Record<string, unknown>,
+    category: Record<string, unknown> | null,
+    configuration: StoreProductTaxConfiguration | null,
+  ): {
+    applicable: boolean;
+    rate: number;
+    amount: string | null;
+    priceIncludingTax: string | null;
+    taxClass: { name: string; rate: number } | null;
+  } {
+    const price = this.numberOrNull(product.price);
+    if (!configuration || !configuration.taxEnabled) {
+      return {
+        applicable: false,
+        rate: 0,
+        amount: price === null ? null : this.formatMoney(0, configuration?.decimalPlaces),
+        priceIncludingTax: price === null ? null : this.formatMoney(price, configuration?.decimalPlaces),
+        taxClass: null,
+      };
+    }
+    const productClass = this.taxClassKey(product.tax_class ?? category?.pos_tax_class ?? category?.posTaxClass);
+    const configuredClass = configuration.taxClasses.find(
+      (taxClass) => this.taxClassKey(taxClass.name) === productClass,
+    );
+    const categoryRate = this.numberOrNull(category?.pos_tax_percent ?? category?.posTaxPercent);
+    const rate = configuredClass?.rate ?? categoryRate ?? configuration.defaultTaxRate ?? 0;
+    const taxClass = {
+      name: configuredClass?.name ?? (productClass === 'standard' ? 'Standard' : productClass),
+      rate,
+    };
+    const amount = price === null ? null : price * rate / 100;
+    return {
+      applicable: true,
+      rate,
+      amount: amount === null ? null : this.formatMoney(amount, configuration.decimalPlaces),
+      priceIncludingTax: price === null || amount === null
+        ? null
+        : this.formatMoney(price + amount, configuration.decimalPlaces),
+      taxClass,
+    };
+  }
+
+  private taxClassKey(value: unknown): string {
+    const normalized = String(value ?? '').trim().toLowerCase();
+    if (!normalized || normalized === 'standard-rate') return 'standard';
+    return normalized.replace(/[_\s]+/g, '-').replace(/-rated?$/, '');
+  }
+
+  private formatMoney(value: number, decimalPlaces = 2): string {
+    const places = Number.isInteger(decimalPlaces) ? Math.min(6, Math.max(0, decimalPlaces)) : 2;
+    const factor = 10 ** places;
+    return (Math.round((value + Number.EPSILON) * factor) / factor).toFixed(places);
   }
 
   private productImages(product: Record<string, unknown>): unknown {

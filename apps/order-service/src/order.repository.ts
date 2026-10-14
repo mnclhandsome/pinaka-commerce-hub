@@ -1030,8 +1030,120 @@ export class OrderRepository implements OnModuleInit {
         items: items.filter((item) => item.orderId === id),
       }];
     });
+    await this.enrichCustomItemTaxesForListing(rows);
     const products = await this.catalogProducts(rows);
     return { total, orders: rows.map((row) => ({ ...row, products })) };
+  }
+
+  /**
+   * Older/external POS orders can persist custom lines without WooCommerce tax
+   * fields. Enrich only the total-orders read model from the line's category;
+   * never rewrite the historical order or alter catalog-product taxation.
+   */
+  private async enrichCustomItemTaxesForListing(
+    rows: Array<{ order: OrderEntity; storeOrder: StoreOrderEntity | null; items: OrderItemEntity[] }>,
+  ): Promise<void> {
+    if (!this.dataSource) return;
+    const storeIds = [...new Set(rows.map((row) => row.order.storeId).filter(Boolean))];
+    if (!storeIds.length) return;
+
+    const categories: Array<{
+      store_id?: string;
+      id?: string;
+      wordpress_id?: string;
+      slug?: string;
+      name?: string;
+      rate?: string;
+    }> = await this.dataSource.query(
+      `SELECT COALESCE(to_jsonb(category)->>'storeId', to_jsonb(category)->>'store_id') AS store_id,
+              COALESCE(to_jsonb(category)->>'id', '') AS id,
+              COALESCE(to_jsonb(category)->>'wordpressId', to_jsonb(category)->>'wordpress_id', '') AS wordpress_id,
+              COALESCE(to_jsonb(category)->>'slug', '') AS slug,
+              COALESCE(to_jsonb(category)->>'name', '') AS name,
+              COALESCE(to_jsonb(category)->>'posTaxPercent', to_jsonb(category)->>'pos_tax_percent') AS rate
+         FROM public.categories AS category
+        WHERE COALESCE(to_jsonb(category)->>'storeId', to_jsonb(category)->>'store_id') = ANY($1::text[])`,
+      [storeIds],
+    );
+    const rates = new Map<string, number>();
+    categories.forEach((category) => {
+      const rate = Number(category.rate);
+      if (!category.store_id || !Number.isFinite(rate)) return;
+      [category.id, category.wordpress_id, category.slug, category.name]
+        .map((value) => String(value || '').trim().toLowerCase())
+        .filter(Boolean)
+        .forEach((key) => rates.set(`${category.store_id}:${key}`, rate));
+    });
+
+    rows.forEach(({ order, storeOrder }) => {
+      if (!storeOrder || !Array.isArray(storeOrder.lineItems)) return;
+      let enriched = false;
+      const addedTaxByRate = new Map<number, number>();
+      storeOrder.lineItems.forEach((rawLine) => {
+        const line = rawLine as any;
+        const existingTax = Number(line?.total_tax ?? 0);
+        if (Number.isFinite(existingTax) && existingTax > 0) return;
+        if (String(line?.type || '').trim().toLowerCase() !== 'custom') return;
+
+        const categoryReference = line.category_id
+          ?? line.categoryId
+          ?? line.category?.id
+          ?? line.categories?.[0]?.id
+          ?? line.category_slug
+          ?? line.categorySlug
+          ?? line.category?.slug
+          ?? line.category_name
+          ?? line.categoryName
+          ?? line.category?.name
+          ?? line.tax_class
+          ?? 'custom-product';
+        const categoryKey = String(categoryReference).trim().toLowerCase();
+        const rate = rates.get(`${order.storeId}:${categoryKey}`)
+          ?? rates.get(`${order.storeId}:custom-product`);
+        if (rate === undefined) return;
+
+        const subtotal = Number(line.subtotal ?? line.total ?? 0);
+        const total = Number(line.total ?? line.subtotal ?? 0);
+        if (!Number.isFinite(subtotal) || !Number.isFinite(total)) return;
+        const subtotalTax = Math.round(subtotal * rate) / 100;
+        const totalTax = Math.round(total * rate) / 100;
+        line.subtotal_tax = subtotalTax.toFixed(2);
+        line.total_tax = totalTax.toFixed(2);
+        line.taxes = [{ id: rate, total: line.total_tax, subtotal: line.subtotal_tax }];
+        addedTaxByRate.set(rate, (addedTaxByRate.get(rate) || 0) + totalTax);
+        enriched = true;
+      });
+      if (!enriched) return;
+      const existingTaxLines = Array.isArray(storeOrder.taxLines)
+        ? storeOrder.taxLines.map((line) => ({ ...(line as Record<string, unknown>) }))
+        : [];
+      addedTaxByRate.forEach((amount, rate) => {
+        const matchingLine = existingTaxLines.find(
+          (line) => Number(line.rate_percent) === rate,
+        );
+        if (matchingLine) {
+          const currentAmount = Number(matchingLine.tax_total ?? 0);
+          matchingLine.tax_total = ((Number.isFinite(currentAmount) ? currentAmount : 0) + amount).toFixed(2);
+          return;
+        }
+        const id = existingTaxLines.length + 1;
+        existingTaxLines.push({
+          id,
+          rate_code: `POS-TAX-${id}`,
+          rate_id: id,
+          label: 'Tax',
+          compound: false,
+          tax_total: amount.toFixed(2),
+          shipping_tax_total: '0.00',
+          rate_percent: rate,
+          meta_data: [],
+        });
+      });
+      const storedTaxTotal = Number(storeOrder.taxTotal ?? 0);
+      const addedTaxTotal = [...addedTaxByRate.values()].reduce((sum, amount) => sum + amount, 0);
+      storeOrder.taxTotal = (Number.isFinite(storedTaxTotal) ? storedTaxTotal : 0) + addedTaxTotal;
+      storeOrder.taxLines = existingTaxLines;
+    });
   }
 
   private async catalogProducts(

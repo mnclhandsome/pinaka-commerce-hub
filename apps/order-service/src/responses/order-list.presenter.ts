@@ -3,7 +3,6 @@ import type { OrderEntity } from '../entities/order.entity';
 import { PaymentStatus } from '../entities/order.entity';
 import type { OrderItemEntity } from '../entities/order-item.entity';
 import type { StoreOrderEntity } from '../entities/store-order.entity';
-import { clientOrderIdValue } from './client-order-id';
 
 export interface OrderListRequest {
   page?: string;
@@ -184,7 +183,17 @@ export class OrderListPresenter {
   }
 
   private clientOrderId(order: OrderEntity, storeOrder: StoreOrderEntity | null): string | number | null {
-    return clientOrderIdValue(order, storeOrder);
+    const request = (order.requestPayload || {}) as { meta_data?: Array<{ key?: string; value?: unknown }> };
+    const fromPayload = Array.isArray(request.meta_data)
+      ? request.meta_data.find((entry) => entry?.key === '_pos_client_order_id')?.value
+      : undefined;
+    const raw = storeOrder?.clientOrderId || order.clientOrderId || this.metaValue(order, '_pos_client_order_id') || fromPayload;
+    const value = String(raw ?? '').trim();
+    if (!value) return null;
+    if (/^\d+$/.test(value) && !value.startsWith('0') && Number.isSafeInteger(Number(value))) {
+      return Number(value);
+    }
+    return value;
   }
 
   private metaValue(order: OrderEntity, key: string): string {

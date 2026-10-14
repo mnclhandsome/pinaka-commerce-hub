@@ -244,12 +244,14 @@ export class PosRepository implements OnModuleInit {
     openingCash: number,
     registerId?: string,
     denominationData: ShiftDenominationData = {},
+    openedByEmployeeId?: string,
   ): Promise<PosShiftEntity> {
     const shift: PosShiftEntity = {
       id: `SHIFT-${randomUUID()}`,
       merchantId,
       storeId,
       registerId,
+      openedByEmployeeId,
       terminalId: terminalId || 'SUNMI-D3-01',
       cashierName: cashierName || 'Cashier',
       openingCash: Number(openingCash),
@@ -313,18 +315,24 @@ export class PosRepository implements OnModuleInit {
   }
 
   // --- Close Shift & Generate Z-Report ---
-  async closeShift(shiftId: string, closingCashActual: number): Promise<{ success: boolean; shift?: PosShiftEntity; message?: string }> {
+  async closeShift(shiftId: string, closingCashActual: number, closedByEmployeeId?: string): Promise<{ success: boolean; shift?: PosShiftEntity; message?: string }> {
     let shift: PosShiftEntity | null = null;
 
     if (this.isDbConnected && this.shiftRepo) {
       shift = await this.shiftRepo.findOne({ where: { id: shiftId } });
       if (shift) {
+        const sales = (await this.getSalesByShift([shift.id])).get(shift.id);
+        if (sales) {
+          shift.totalCashSales = sales.cash;
+          shift.totalCardSales = sales.card;
+        }
         const expected = Number(shift.openingCash) + Number(shift.totalCashSales) - Number(shift.totalSafeDrops) - Number(shift.totalPaidOuts);
         shift.closingCashActual = Number(closingCashActual);
         shift.expectedCashInDrawer = expected;
         shift.discrepancy = Number(closingCashActual) - expected;
         shift.status = ShiftStatus.CLOSED;
         shift.closedAt = new Date();
+        if (closedByEmployeeId) shift.closedByEmployeeId = closedByEmployeeId;
         shift = await this.shiftRepo.save(shift);
       }
     } else {
@@ -336,6 +344,7 @@ export class PosRepository implements OnModuleInit {
         shift.discrepancy = Number(closingCashActual) - expected;
         shift.status = ShiftStatus.CLOSED;
         shift.closedAt = new Date();
+        if (closedByEmployeeId) shift.closedByEmployeeId = closedByEmployeeId;
       }
     }
 
@@ -358,18 +367,94 @@ export class PosRepository implements OnModuleInit {
       .sort((left, right) => right.openedAt.getTime() - left.openedAt.getTime());
   }
 
+  async getShiftsByEmployee(employeeId: string, storeId?: string): Promise<PosShiftEntity[]> {
+    if (this.isDbConnected && this.shiftRepo) {
+      const shifts = await this.shiftRepo.find({
+        where: { openedByEmployeeId: employeeId, ...(storeId ? { storeId } : {}) },
+        order: { openedAt: 'DESC', createdAt: 'DESC' },
+      });
+      return this.withOrderSales(shifts);
+    }
+    return this.inMemoryShifts
+      .filter((shift) => shift.openedByEmployeeId === employeeId && (!storeId || shift.storeId === storeId))
+      .sort((left, right) => right.openedAt.getTime() - left.openedAt.getTime());
+  }
+
+  // Cash/card sales per shift from store_orders (order-service, same database),
+  // matched on the PCH shift id the POS app sends in order meta_data.shift_id.
+  // Split tenders come from meta_data._pos_payments; otherwise the order's
+  // payment_method decides. Anything that is not cash counts as card.
+  private async getSalesByShift(shiftIds: string[]): Promise<Map<string, { cash: number; card: number }>> {
+    const sales = new Map<string, { cash: number; card: number }>();
+    if (!this.dataSource || shiftIds.length === 0) return sales;
+    try {
+      const rows: Array<{ shift_id: string; cash: string; card: string }> = await this.dataSource.query(
+        `WITH shift_orders AS (
+           SELECT so.shift_id, so.total, lower(coalesce(so.payment_method, '')) AS method,
+                  (SELECT e->'value'
+                     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(so.meta_data) = 'array' THEN so.meta_data ELSE '[]'::jsonb END) e
+                    WHERE e->>'key' = '_pos_payments' LIMIT 1) AS split
+             FROM public.store_orders so
+            WHERE so.shift_id = ANY($1)
+              AND lower(so.status) IN ('completed', 'processing')
+              AND NOT so.pay_later
+         ),
+         tenders AS (
+           SELECT shift_id, lower(coalesce(p->>'method', '')) AS method, (p->>'amount')::numeric AS amount
+             FROM shift_orders,
+                  jsonb_array_elements(CASE WHEN jsonb_typeof(split) = 'array' THEN split ELSE '[]'::jsonb END) p
+            WHERE lower(coalesce(p->>'status', 'completed')) = 'completed'
+           UNION ALL
+           SELECT shift_id, method, total
+             FROM shift_orders
+            WHERE jsonb_array_length(CASE WHEN jsonb_typeof(split) = 'array' THEN split ELSE '[]'::jsonb END) = 0
+         )
+         SELECT shift_id,
+                coalesce(sum(amount) FILTER (WHERE method = 'cash'), 0) AS cash,
+                coalesce(sum(amount) FILTER (WHERE method <> 'cash'), 0) AS card
+           FROM tenders
+          GROUP BY shift_id`,
+        [shiftIds],
+      );
+      for (const row of rows) {
+        sales.set(row.shift_id, { cash: Number(row.cash), card: Number(row.card) });
+      }
+    } catch (error) {
+      console.error('[POS] Could not total shift sales from store_orders:', error);
+    }
+    return sales;
+  }
+
+  // Fills sales from orders and recomputes expected cash / over-short for closed shifts.
+  private async withOrderSales(shifts: PosShiftEntity[]): Promise<PosShiftEntity[]> {
+    const sales = await this.getSalesByShift(shifts.map((shift) => shift.id));
+    for (const shift of shifts) {
+      const totals = sales.get(shift.id);
+      if (!totals) continue;
+      shift.totalCashSales = totals.cash;
+      shift.totalCardSales = totals.card;
+      if (shift.closingCashActual !== null && shift.closingCashActual !== undefined) {
+        const expected = Number(shift.openingCash) + totals.cash - Number(shift.totalSafeDrops) - Number(shift.totalPaidOuts);
+        shift.expectedCashInDrawer = expected;
+        shift.discrepancy = Number(shift.closingCashActual) - expected;
+      }
+    }
+    return shifts;
+  }
+
   async getShiftWithSafeTransactions(shiftId: string, storeId: string) {
-    const shift = await this.shiftRepo?.findOne({ where: { id: shiftId, storeId } });
-    if (!shift) return null;
+    const found = await this.shiftRepo?.findOne({ where: { id: shiftId, storeId } });
+    if (!found) return null;
+    const [shift] = await this.withOrderSales([found]);
     const safes = await this.dataSource!.query(
       `SELECT id AS safe_id, title, created_at, safe_data, shift_id, created_by
-       FROM public.pos_safe_transactions WHERE shift_id = $1 AND store_id = $2 ORDER BY created_at DESC, id DESC`,
-      [shiftId, storeId],
+       FROM public.pos_safe_transactions WHERE shift_id = $1 ORDER BY created_at DESC, id DESC`,
+      [shiftId],
     );
     const safe_drops = await this.dataSource!.query(
       `SELECT id AS safe_drop_id, title, created_at, safe_data, shift_id, created_by
-       FROM public.pos_safe_drop_transactions WHERE shift_id = $1 AND store_id = $2 ORDER BY created_at DESC, id DESC`,
-      [shiftId, storeId],
+       FROM public.pos_safe_drop_transactions WHERE shift_id = $1 ORDER BY created_at DESC, id DESC`,
+      [shiftId],
     );
     return {
       id: shift.id,

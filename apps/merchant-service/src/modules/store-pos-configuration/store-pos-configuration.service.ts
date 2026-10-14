@@ -6,17 +6,14 @@ import {
 } from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { MerchantRepository } from '../merchant/merchant.repository';
-import { FileStorageService } from '../file-storage/file-storage.service';
 import { StorePosConfigurationEntity } from '../../entities/store-pos-configuration.entity';
 import { CreateStorePosConfigurationDto } from './dto/create-store-pos-configuration.dto';
 import { UpdateStorePosConfigurationDto } from './dto/update-store-pos-configuration.dto';
+import { CashBackSettingsResponse, mapCashbackSettings } from './cashback-settings.model';
 
 @Injectable()
 export class StorePosConfigurationsService {
-  constructor(
-    @Inject(MerchantRepository) private readonly merchants: MerchantRepository,
-    @Inject(FileStorageService) private readonly files: FileStorageService,
-  ) {}
+  constructor(@Inject(MerchantRepository) private readonly merchants: MerchantRepository) {}
 
   private repository(): Repository<StorePosConfigurationEntity> {
     return this.merchants.requireDataSource().getRepository(StorePosConfigurationEntity);
@@ -100,6 +97,21 @@ export class StorePosConfigurationsService {
       );
     }
 
+    return configuration;
+  }
+
+  /**
+   * POS cashback reads the stored row and returns the cash_back_service model.
+   * Every other configuration name keeps the stored row.
+   */
+  async findPresented(
+    storeId: string,
+    configurationName: string,
+  ): Promise<StorePosConfigurationEntity | CashBackSettingsResponse> {
+    const configuration = await this.findOne(storeId, configurationName);
+    if (configurationName === 'cashback_settings') {
+      return mapCashbackSettings(configuration.configurationValue);
+    }
     return configuration;
   }
 
@@ -318,14 +330,13 @@ export class StorePosConfigurationsService {
     if (notes.length || coins.length) return [notes, coins];
 
     const rows = await this.optionalRows(
-      `SELECT i.id, i.kind, i.amount AS denom, i."imageName" AS "imageName", i."imageData" AS image
+      `SELECT i.kind, i.amount AS denom, i."imageData" AS image
        FROM public.pos_cash_denomination_items i
        JOIN public.pos_cash_denomination_settings s ON s.id = i."denominationId"
        WHERE s."storeId" = $1
        ORDER BY i."sortOrder" ASC, i.amount ASC`,
       [storeId],
     );
-    await this.relocateStoredImages(storeId, rows, 'pos_cash_denomination_items');
     return [
       this.denomList(rows.filter((row) => String(row.kind).toLowerCase() === 'cash')),
       this.denomList(rows.filter((row) => String(row.kind).toLowerCase() === 'coin')),
@@ -366,7 +377,7 @@ export class StorePosConfigurationsService {
     }
     const [denominations, tubes] = await Promise.all([
       this.optionalRows(
-        `SELECT id, amount AS denom, "imageName" AS "imageName", "imageData" AS image
+        `SELECT amount AS denom, image_data AS image
          FROM public.pos_safe_drop_denominations
          WHERE safe_drop_id = $1::uuid
          ORDER BY sort_order ASC, amount ASC`,
@@ -380,7 +391,6 @@ export class StorePosConfigurationsService {
         [setting.id],
       ),
     ]);
-    await this.relocateStoredImages(storeId, denominations, 'pos_safe_drop_denominations');
     return {
       denominations: this.denomList(denominations),
       tubes: this.tubeList(tubes, currencySymbol),
@@ -495,35 +505,6 @@ export class StorePosConfigurationsService {
         display_name: displayName,
       };
     });
-  }
-
-  private async relocateStoredImages(
-    storeId: string,
-    rows: Array<Record<string, any>>,
-    table: 'pos_cash_denomination_items' | 'pos_safe_drop_denominations',
-  ): Promise<void> {
-    const pending = rows.filter((row) => this.files.isDataImage(String(row.image ?? '')));
-    if (!pending.length) return;
-    const store = await this.merchants.getStoreById(storeId);
-    if (!store) return;
-    const { merchant } = await this.merchants.getMerchantById(store.merchantId);
-    if (!merchant) return;
-    const merchantName = merchant.businessDisplayName || merchant.merchantCode || merchant.merchantId || 'merchant';
-    const storeName = store.storeName || 'store';
-    for (const row of pending) {
-      const url = await this.files.storeImageData({
-        merchantName,
-        storeName,
-        imageName: String(row.imageName || 'image'),
-        imageData: String(row.image),
-      });
-      row.image = url;
-      if (!row.id) continue;
-      const sql = table === 'pos_cash_denomination_items'
-        ? 'UPDATE public.pos_cash_denomination_items SET "imageData" = $2, "updatedAt" = now() WHERE id = $1::uuid'
-        : 'UPDATE public.pos_safe_drop_denominations SET "imageData" = $2, "updatedAt" = now() WHERE id = $1::uuid';
-      await this.merchants.requireDataSource().query(sql, [row.id, url]);
-    }
   }
 
   private denomList(value: unknown): Array<{ denom: string | null; image: string | null }> {
