@@ -16,7 +16,7 @@ export class DeviceService {
     if (!merchant) return null;
     return this.mappings.findAvailableDevicesByMerchant(merchant.id);
   }
-  createDevice(data: Parameters<MerchantRepository['createDevice']>[0]) {
+  createDevice(data: Parameters<DeviceRepository['createDeviceWithMerchantMapping']>[0]) {
     return this.mappings.createDeviceWithMerchantMapping(data);
   }
   async queryDevices(filters: Parameters<MerchantRepository['queryDevices']>[0]) {
