@@ -82,7 +82,7 @@ export class StorePosConfigurationController {
     @Param('storeId') storeId: string,
     @Param('configurationName') configurationName: string,
   ) {
-    return this.service.findOne(
+    return this.service.findPresented(
       storeId,
       configurationName,
     );

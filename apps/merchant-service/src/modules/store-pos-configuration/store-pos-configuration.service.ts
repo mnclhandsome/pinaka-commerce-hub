@@ -9,6 +9,7 @@ import { MerchantRepository } from '../merchant/merchant.repository';
 import { StorePosConfigurationEntity } from '../../entities/store-pos-configuration.entity';
 import { CreateStorePosConfigurationDto } from './dto/create-store-pos-configuration.dto';
 import { UpdateStorePosConfigurationDto } from './dto/update-store-pos-configuration.dto';
+import { CashBackSettingsResponse, mapCashbackSettings } from './cashback-settings.model';
 
 @Injectable()
 export class StorePosConfigurationsService {
@@ -96,6 +97,21 @@ export class StorePosConfigurationsService {
       );
     }
 
+    return configuration;
+  }
+
+  /**
+   * POS cashback reads the stored row and returns the cash_back_service model.
+   * Every other configuration name keeps the stored row.
+   */
+  async findPresented(
+    storeId: string,
+    configurationName: string,
+  ): Promise<StorePosConfigurationEntity | CashBackSettingsResponse> {
+    const configuration = await this.findOne(storeId, configurationName);
+    if (configurationName === 'cashback_settings') {
+      return mapCashbackSettings(configuration.configurationValue);
+    }
     return configuration;
   }
 
