@@ -8,6 +8,7 @@ export interface CreateSessionParams {
   deviceId: string;
   registerId?: string;
   roleId: string;
+  roleCode: string;
 }
 
 export interface PosAccessTokenPayload {
@@ -17,6 +18,7 @@ export interface PosAccessTokenPayload {
   storeId?: string;
   deviceId?: string;
   type?: string;
+  roleCode?: string;
   exp: number;
 }
 
@@ -62,6 +64,7 @@ export class PosSessionService {
       deviceId: params.deviceId,
       registerId: params.registerId || 'REG-01',
       roleId: params.roleId,
+      roleCode: params.roleCode,
       iat: now,
       exp: now + 12 * 3600,
     };

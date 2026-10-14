@@ -421,6 +421,7 @@ export class PosAuthService {
       deviceId: activeDeviceId,
       registerId: registerId,
       roleId: matchedRoleId,
+      roleCode: matchedRole,
     });
 
     // Save session into employee_sessions table
