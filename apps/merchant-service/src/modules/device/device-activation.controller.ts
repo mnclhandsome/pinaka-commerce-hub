@@ -110,7 +110,7 @@ export class DeviceActivationController {
     let merchant: any;
     let store: any;
     try {
-      const result = await this.merchants
+      const result = await this.merchantRepository
         .requireDataSource()
         .transaction(async (manager) => {
           const [found] = await manager.query(
@@ -299,7 +299,6 @@ export class DeviceActivationController {
       body?.deviceIdentifier ||
       'SUNMI-D3-ABC123';
     const serialStr = String(serial).trim();
-    activatedSerials.delete(serialStr);
     try {
       const dataSource = this.merchants.requireDataSource();
     await dataSource.query(
