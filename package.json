@@ -10,6 +10,7 @@
     "start:all:window": "powershell -ExecutionPolicy Bypass -File ./scripts/launch-pdh.ps1",
     "restart:all:windows": "powershell -ExecutionPolicy Bypass -File ./scripts/launch-pdh.ps1 -Restart",
     "restart:all:window": "powershell -ExecutionPolicy Bypass -File ./scripts/launch-pdh.ps1 -Restart",
+    "pgadmin": "powershell -ExecutionPolicy Bypass -Command \"Start-Process 'C:\\Program Files\\PostgreSQL\\18\\pgAdmin 4\\runtime\\pgAdmin4.exe' -WorkingDirectory 'C:\\Program Files\\PostgreSQL\\18\\pgAdmin 4\\runtime'; Write-Host '🐘 pgAdmin 4 launched on http://localhost:5050'\"",
     "start:gateway": "nx serve gateway",
     "start:orders": "nx serve order-service",
     "start:connectors": "nx serve connector-service",

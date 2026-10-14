@@ -1,4 +1,5 @@
 import { ConflictException, Inject, Injectable } from '@nestjs/common';
+import { randomInt } from 'node:crypto';
 import { MerchantRepository } from '../merchant/merchant.repository';
 import { MerchantDeviceEntity } from '../../entities/merchant-device.entity';
 import { DeviceEntity } from '../../entities/device.entity';
@@ -10,13 +11,14 @@ export class DeviceRepository {
 
   async createDeviceWithMerchantMapping(data: {
     id: string;
-    deviceId?: string;
+    deviceId?: string | null;
     deviceName?: string;
     deviceCode?: string;
     deviceType: string;
     merchantId: string;
     merchantName?: string;
-    serialNumber: string;
+    serialNumber?: string | null;
+    notes?: string | null;
     status?: RecordStatus;
     createdBy: string;
     updatedBy: string;
@@ -32,16 +34,34 @@ export class DeviceRepository {
         `);
         const nextCode = Number(rows[0]?.maxCode ?? 0) + 1;
         const deviceCode = `DVC-${String(nextCode).padStart(5, '0')}`;
+        let deviceActiveCode = '';
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          const candidate = `PK-${randomInt(100000, 1000000)}`;
+          const existing = await manager.query(
+            'SELECT 1 FROM public.devices WHERE device_active_code = $1 OR authorization_code = $1 LIMIT 1',
+            [candidate],
+          );
+          if (existing.length === 0) {
+            deviceActiveCode = candidate;
+            break;
+          }
+        }
+        if (!deviceActiveCode) {
+          throw new ConflictException('Unable to allocate a unique device activation code');
+        }
         const deviceRepository = manager.getRepository(DeviceEntity);
         const device = await deviceRepository.save(deviceRepository.create({
           id: data.id,
-          deviceId: data.deviceId,
+          deviceId: data.deviceId ?? null,
+          deviceActiveCode,
+          authorizationCode: deviceActiveCode,
           deviceName: data.deviceName || 'Unnamed device',
           deviceCode,
           deviceType: data.deviceType,
           merchantId: data.merchantId,
           merchantName: data.merchantName || data.merchantId,
-          serialNumber: data.serialNumber,
+          serialNumber: data.serialNumber ?? null,
+          notes: data.notes ?? null,
           status: data.status || RecordStatus.ACTIVE,
           createdBy: data.createdBy,
           updatedBy: data.updatedBy,
@@ -59,7 +79,7 @@ export class DeviceRepository {
       });
     } catch (error: any) {
       if ((error?.driverError?.code || error?.code) === '23505') {
-        throw new ConflictException('Device code or serial number already exists');
+        throw new ConflictException('Device code, serial number, or activation code already exists');
       }
       throw error;
     }
