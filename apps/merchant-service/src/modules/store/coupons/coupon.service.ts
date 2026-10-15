@@ -179,7 +179,7 @@ export class CouponService implements OnModuleInit {
   private async registerCouponWebhooksLocked(storeId: string, requestBaseUrl: string) {
     const publicBaseUrl = String(process.env.COUPON_WEBHOOK_BASE_URL || requestBaseUrl || '').trim().replace(/\/+$/, '');
     if (!publicBaseUrl) throw new Error('Public merchant-service URL is unavailable');
-    const callback = `${publicBaseUrl}/api/v1/coupons/webhook?storeId=${encodeURIComponent(storeId)}`;
+    const callback = `${publicBaseUrl}/connector/api/v1/coupons/webhook?storeId=${encodeURIComponent(storeId)}`;
     const callbackHost = new URL(callback).hostname.toLowerCase();
     if (['localhost', '127.0.0.1', '::1'].includes(callbackHost)) {
       throw new Error('WooCommerce cannot deliver webhooks to localhost; call the API through its public URL');
