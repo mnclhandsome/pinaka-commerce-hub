@@ -95,7 +95,7 @@ export class PosEmployeeAttendanceQueryDto {
   date?: string;
 
   @IsOptional()
-  @IsIn(['PRESENT', 'COMPLETED', 'INCOMPLETE'])
+  @IsIn(['PRESENT', 'CLOCK_OUT', 'INCOMPLETE'])
   status?: string;
 
   @IsOptional()

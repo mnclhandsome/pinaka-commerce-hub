@@ -191,7 +191,7 @@ export class PosEmployeeAttendanceRepository {
 
       const updated = await manager.query(
         `UPDATE public.pos_employee_attendance
-         SET clock_out = clock_timestamp(), status = 'COMPLETED', updated_at = now()
+         SET clock_out = clock_timestamp(), status = 'CLOCK_OUT', updated_at = now()
          WHERE id = $1::uuid AND clock_out IS NULL
            AND clock_in <= clock_timestamp()
          RETURNING id::text AS id,

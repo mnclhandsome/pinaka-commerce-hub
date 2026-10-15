@@ -76,15 +76,24 @@ export async function ensurePosEmployeeAttendanceSchema(db: DataSource): Promise
         DROP CONSTRAINT IF EXISTS pos_employee_attendance_status_clock_chk
     `);
 
+    // Legacy completed shifts have the same meaning as CLOCK_OUT.
+    await manager.query(`
+      UPDATE public.pos_employee_attendance SET status = 'CLOCK_OUT'
+      WHERE status = 'COMPLETED' AND clock_out IS NOT NULL
+    `);
+
     await manager.query(`
       ALTER TABLE public.pos_employee_attendance
         ADD CONSTRAINT pos_employee_attendance_status_chk
-          CHECK (status IN ('PRESENT', 'COMPLETED', 'INCOMPLETE')),
+          CHECK (status IN ('PRESENT', 'CLOCK_OUT', 'INCOMPLETE')),
         ADD CONSTRAINT pos_employee_attendance_clock_range_chk
           CHECK (clock_out IS NULL OR clock_out >= clock_in),
         ADD CONSTRAINT pos_employee_attendance_status_clock_chk
-          CHECK ((clock_out IS NULL AND status IN ('PRESENT', 'INCOMPLETE'))
-              OR (clock_out IS NOT NULL AND status = 'COMPLETED'))
+          CHECK (
+            (clock_out IS NULL AND status IN ('PRESENT', 'INCOMPLETE'))
+            OR
+            (clock_out IS NOT NULL AND status = 'CLOCK_OUT')
+          )
     `);
 
     // 4. Ensure indexes use snake_case columns
