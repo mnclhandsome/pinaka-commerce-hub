@@ -1,3 +1,4 @@
+import { In } from 'typeorm';
 import {
   ForbiddenException,
   HttpException,
@@ -166,6 +167,14 @@ export class FastkeyService {
       where: { storeId, isDeleted: false },
       order: { createdAt: 'ASC', id: 'ASC' },
     });
+    const employeeIds = [...new Set(rows.map(row => row.employeeId))];
+    const employees = employeeIds.length
+      ? await db.getRepository(EmployeeEntity).find({
+          where: { id: In(employeeIds) },
+          select: { id: true, email: true },
+        })
+      : [];
+    const emails = new Map(employees.map(employee => [employee.id, employee.email ?? null]));
     const fastkeys = await Promise.all(rows
       .sort((left, right) => this.fastkeyIndex(left) - this.fastkeyIndex(right))
       .map(async row => {
@@ -176,6 +185,9 @@ export class FastkeyService {
           fastkey_image: row.fastkeyImage?.trim() || origin + '/uploads/fastkeys/no-image.png',
           itemCount: assignments.length,
           user_id: row.employeeId,
+          email: emails.get(row.employeeId) ?? null,
+          created_at: row.createdAt ?? null,
+          updated_at: row.updatedAt ?? null,
           store_id: row.storeId,
           fastkey_index: this.fastkeyIndex(row),
           products: await this.enhanceProducts(row.storeId, assignments),
