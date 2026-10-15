@@ -489,10 +489,42 @@ export class OrderRepository implements OnModuleInit {
     const defaultRate = taxSetting?.taxEnabled === false ? 0 : Number(taxSetting?.defaultTaxRate || 0);
     const explicitTax = sourcePayload.total_tax !== undefined || (Array.isArray(sourcePayload.tax_lines) && sourcePayload.tax_lines.length > 0);
     const taxGroups = new Map<number, number>();
+    let normalizedCustomItem = false;
 
     lines.forEach((line: any) => {
+      const customNormalization = this.normalizeCustomItemQuantity(line, places);
+      normalizedCustomItem ||= customNormalization.applied;
       const product = products.get(String(line?.product_id ?? '').trim());
-      if (!product) return;
+      if (!product) {
+        if (String(line?.type || '').trim().toLowerCase() !== 'custom') return;
+        const taxClass = taxClassKey(line.tax_class);
+        const rate = taxClass ? (classRates.get(taxClass) ?? defaultRate) : defaultRate;
+        const existingTax = Number(line.total_tax);
+        if (Number.isFinite(existingTax)) {
+          if (customNormalization.applied) {
+            // WooCommerce line amounts and taxes are quantity-extended values. The POS
+            // custom-item contract supplies unit values, so extend them exactly once here.
+            const previousSubtotalTax = Number(line.subtotal_tax ?? existingTax);
+            const subtotalTax = previousSubtotalTax * customNormalization.quantity;
+            const totalTax = existingTax * customNormalization.quantity;
+            line.subtotal_tax = subtotalTax.toFixed(places);
+            line.total_tax = totalTax.toFixed(places);
+            line.taxes = rate > 0 ? [{ id: rate, total: line.total_tax, subtotal: line.subtotal_tax }] : [];
+            const taxDeltaMinor = Math.round((totalTax - existingTax) * factor);
+            if (taxDeltaMinor) taxGroups.set(rate, (taxGroups.get(rate) || 0) + taxDeltaMinor);
+          }
+          return;
+        }
+        const subtotalMinor = Math.round(Number(line.subtotal || 0) * factor);
+        const totalMinor = Math.round(Number(line.total || 0) * factor);
+        const subtotalTaxMinor = rate > 0 ? Math.round(subtotalMinor * rate / 100) : 0;
+        const totalTaxMinor = rate > 0 ? Math.round(totalMinor * rate / 100) : 0;
+        line.subtotal_tax = (subtotalTaxMinor / factor).toFixed(places);
+        line.total_tax = (totalTaxMinor / factor).toFixed(places);
+        line.taxes = totalTaxMinor ? [{ id: rate, total: line.total_tax, subtotal: line.subtotal_tax }] : [];
+        if (totalTaxMinor) taxGroups.set(rate, (taxGroups.get(rate) || 0) + totalTaxMinor);
+        return;
+      }
       const quantity = Number(line.quantity || 1);
       const price = Number(product.price ?? product.sale_price ?? product.regular_price ?? 0);
       if (line.name === undefined) line.name = String(product.name || 'Sales Item');
@@ -526,6 +558,32 @@ export class OrderRepository implements OnModuleInit {
       }));
       sourcePayload.total_tax = ([...taxGroups.values()].reduce((sum, minor) => sum + minor, 0) / factor).toFixed(places);
       sourcePayload.cart_tax = sourcePayload.total_tax;
+    } else if (taxGroups.size) {
+      const addedTax = [...taxGroups.values()].reduce((sum, minor) => sum + minor, 0) / factor;
+      sourcePayload.total_tax = (Number(sourcePayload.total_tax || 0) + addedTax).toFixed(places);
+      sourcePayload.cart_tax = sourcePayload.total_tax;
+      const existingTaxLines = Array.isArray(sourcePayload.tax_lines) ? sourcePayload.tax_lines : [];
+      taxGroups.forEach((minor, rate) => {
+        const amount = minor / factor;
+        const matching = existingTaxLines.find((line: any) => Number(line?.rate_percent) === rate);
+        if (matching) {
+          matching.tax_total = (Number(matching.tax_total || 0) + amount).toFixed(places);
+        } else {
+          const id = existingTaxLines.length + 1;
+          existingTaxLines.push({
+            id,
+            rate_code: `POS-TAX-${id}`,
+            rate_id: id,
+            label: 'Tax',
+            compound: false,
+            tax_total: amount.toFixed(places),
+            shipping_tax_total: (0).toFixed(places),
+            rate_percent: rate,
+            meta_data: [],
+          });
+        }
+      });
+      sourcePayload.tax_lines = existingTaxLines;
     }
 
     const subtotal = lines.reduce((sum: number, line: any) => sum + Number(line.subtotal ?? line.total ?? 0), 0);
@@ -534,8 +592,10 @@ export class OrderRepository implements OnModuleInit {
       .reduce((sum: number, fee: any) => sum + Number(fee?.total || 0), 0);
     const taxTotal = Number(sourcePayload.total_tax || 0);
     const shippingTotal = Number(sourcePayload.shipping_total || 0);
-    if (sourcePayload.subtotal === undefined) sourcePayload.subtotal = subtotal.toFixed(places);
-    if (sourcePayload.total === undefined) sourcePayload.total = (lineTotal + feeTotal + taxTotal + shippingTotal).toFixed(places);
+    if (sourcePayload.subtotal === undefined || normalizedCustomItem) sourcePayload.subtotal = subtotal.toFixed(places);
+    if (sourcePayload.total === undefined || normalizedCustomItem) {
+      sourcePayload.total = (lineTotal + feeTotal + taxTotal + shippingTotal).toFixed(places);
+    }
 
     orderData.items = lines.map((line: any) => {
       const quantity = Number(line.quantity || 1);
@@ -1078,12 +1138,16 @@ export class OrderRepository implements OnModuleInit {
     rows.forEach(({ order, storeOrder }) => {
       if (!storeOrder || !Array.isArray(storeOrder.lineItems)) return;
       let enriched = false;
-      const addedTaxByRate = new Map<number, number>();
+      let addedLineSubtotal = 0;
+      let addedLineTotal = 0;
+      const taxDeltaByRate = new Map<number, number>();
       storeOrder.lineItems.forEach((rawLine) => {
         const line = rawLine as any;
-        const existingTax = Number(line?.total_tax ?? 0);
-        if (Number.isFinite(existingTax) && existingTax > 0) return;
         if (String(line?.type || '').trim().toLowerCase() !== 'custom') return;
+        const previousSubtotal = Number(line.subtotal ?? line.total ?? 0);
+        const previousTotal = Number(line.total ?? line.subtotal ?? 0);
+        const existingTax = Number(line?.total_tax ?? 0);
+        this.normalizeCustomItemQuantity(line, 2);
 
         const categoryReference = line.category_id
           ?? line.categoryId
@@ -1110,14 +1174,19 @@ export class OrderRepository implements OnModuleInit {
         line.subtotal_tax = subtotalTax.toFixed(2);
         line.total_tax = totalTax.toFixed(2);
         line.taxes = [{ id: rate, total: line.total_tax, subtotal: line.subtotal_tax }];
-        addedTaxByRate.set(rate, (addedTaxByRate.get(rate) || 0) + totalTax);
+        addedLineSubtotal += subtotal - (Number.isFinite(previousSubtotal) ? previousSubtotal : 0);
+        addedLineTotal += total - (Number.isFinite(previousTotal) ? previousTotal : 0);
+        taxDeltaByRate.set(
+          rate,
+          (taxDeltaByRate.get(rate) || 0) + totalTax - (Number.isFinite(existingTax) ? existingTax : 0),
+        );
         enriched = true;
       });
       if (!enriched) return;
       const existingTaxLines = Array.isArray(storeOrder.taxLines)
         ? storeOrder.taxLines.map((line) => ({ ...(line as Record<string, unknown>) }))
         : [];
-      addedTaxByRate.forEach((amount, rate) => {
+      taxDeltaByRate.forEach((amount, rate) => {
         const matchingLine = existingTaxLines.find(
           (line) => Number(line.rate_percent) === rate,
         );
@@ -1140,10 +1209,39 @@ export class OrderRepository implements OnModuleInit {
         });
       });
       const storedTaxTotal = Number(storeOrder.taxTotal ?? 0);
-      const addedTaxTotal = [...addedTaxByRate.values()].reduce((sum, amount) => sum + amount, 0);
+      const addedTaxTotal = [...taxDeltaByRate.values()].reduce((sum, amount) => sum + amount, 0);
       storeOrder.taxTotal = (Number.isFinite(storedTaxTotal) ? storedTaxTotal : 0) + addedTaxTotal;
+      const storedSubtotal = Number(storeOrder.subtotal ?? 0);
+      storeOrder.subtotal = (Number.isFinite(storedSubtotal) ? storedSubtotal : 0) + addedLineSubtotal;
+      const storedOrderTotal = Number(storeOrder.total ?? 0);
+      storeOrder.total = (Number.isFinite(storedOrderTotal) ? storedOrderTotal : 0) + addedLineTotal + addedTaxTotal;
       storeOrder.taxLines = existingTaxLines;
     });
+  }
+
+  private normalizeCustomItemQuantity(
+    line: any,
+    places: number,
+  ): { applied: boolean; quantity: number } {
+    if (String(line?.type || '').trim().toLowerCase() !== 'custom') {
+      return { applied: false, quantity: 1 };
+    }
+    const quantity = Number(line.quantity || 1);
+    if (!Number.isFinite(quantity) || quantity <= 1 || line._pch_quantity_applied === true) {
+      return { applied: false, quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1 };
+    }
+    // Persist WooCommerce-compatible line totals while retaining the original unit
+    // price and a marker that prevents total-orders from multiplying them again.
+    const unitSubtotal = Number(line.subtotal ?? line.total ?? line.unit_price ?? line.unitPrice ?? 0);
+    const unitTotal = Number(line.total ?? line.subtotal ?? line.unit_price ?? line.unitPrice ?? 0);
+    if (!Number.isFinite(unitSubtotal) || !Number.isFinite(unitTotal)) {
+      return { applied: false, quantity };
+    }
+    line.unit_price = Number(line.unit_price ?? line.unitPrice ?? unitSubtotal).toFixed(places);
+    line.subtotal = (unitSubtotal * quantity).toFixed(places);
+    line.total = (unitTotal * quantity).toFixed(places);
+    line._pch_quantity_applied = true;
+    return { applied: true, quantity };
   }
 
   private async catalogProducts(
