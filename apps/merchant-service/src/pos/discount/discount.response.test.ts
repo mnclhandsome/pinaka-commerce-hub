@@ -40,6 +40,32 @@ test('list returns the WordPress grouped data and pagination wrapper unchanged',
   assert.deepEqual(result, wordpressResponse);
 });
 
+test('list supports a type query while preserving the source list pagination', async () => {
+  const source = {
+    data: { auto: [{ id: 1 }], mix_match: [{ id: 2 }], multipack: [{ id: 3 }] },
+    pagination: { page: 1, per_page: 10, total: 3, total_pages: 1, has_more: false },
+  };
+  const service = serviceWithConnection();
+  (service as any).wordpressRequest = async () => source;
+  (service as any).saveDiscount = async () => undefined;
+  assert.deepEqual(await service.list('store-1', 'OWNER', { type: 'mix_match' }), {
+    data: source.data.mix_match,
+    pagination: source.pagination,
+  });
+});
+
+test('get by ID reads only the requested type from the existing store_discounts payload', async () => {
+  const service = serviceWithConnection();
+  (service as any).readDiscountPayload = async () => ({
+    auto: [{ id: 41, code: 'AUTO' }],
+    mix_match: [{ id: 41, code: 'MIX' }],
+    multipack: [],
+  });
+  assert.deepEqual(await service.getById('store-1', 'mix_match', '41', 'OWNER'), { id: 41, code: 'MIX' });
+  await assert.rejects(service.getById('store-1', 'multipack', '41', 'OWNER'), (error: any) => error.getStatus() === 404);
+  await assert.rejects(service.getById('store-1', 'coupon', '41', 'OWNER'), (error: any) => error.getStatus() === 400);
+});
+
 test('discount rules projection remains the WordPress top-level array', async () => {
   const sourceResponse = [{ ruleId: 'AUTO_41', ruleType: 'auto', productIds: [8], bundlePrice: 10, requiredQty: 0, active: true }];
   respond(sourceResponse);
@@ -88,7 +114,7 @@ for (const type of types) {
       respond(sourceResponse, 201);
     }
     const result = await service.create('store-1', { type, code: 'Test', amount: 10 }, 'OWNER');
-    assert.deepEqual(result, sourceResponse);
+    assert.deepEqual(result, type === 'multipack' ? { ...sourceResponse, id: 5 } : sourceResponse);
     assert.equal((service as any).saved.id, type === 'multipack' ? 5 : 41);
   });
 
@@ -143,6 +169,36 @@ test('Multipack create keeps its original success body when internal ID lookup i
   const result = await service.create('store-1', { type: 'multipack', code: 'Pack', amount: 2, qty: 3 }, 'OWNER');
   assert.deepEqual(result, sourceResponse);
   assert.equal(calls, 2);
+});
+
+test('sync persists multipack-only pages and honors the source pagination flag', async () => {
+  const service = serviceWithConnection();
+  const writes: unknown[][] = [];
+  const manager = { query: async (...args: unknown[]) => { writes.push(args); return []; } };
+  (service as any).merchants = {
+    requireDataSource: () => ({
+      query: async (sql: string) => sql.includes('to_regclass')
+        ? [{ name: 'store_products' }]
+        : [{ payload: [{ id: 123 }] }],
+      transaction: async (operation: (manager: unknown) => Promise<unknown>) => operation(manager),
+    }),
+  };
+  let page = 0;
+  globalThis.fetch = async () => {
+    page++;
+    const body = page === 1
+      ? { data: { multipack: [{ id: 3, product_id: 123, qty: 3, type: 'multipack' }] }, pagination: { has_more: true } }
+      : { data: {}, pagination: { has_more: false } };
+    return new Response(JSON.stringify(body), { status: 200 });
+  };
+  const result = await service.syncStoreDiscountsFromWordPress({
+    storeId: 'store-1', wordpressUrl: 'https://shop.example', wordpressJwt: 'test-jwt',
+  });
+  assert.deepEqual(result, { discountCount: 1, skippedCount: 0 });
+  assert.equal(page, 2);
+  assert.equal(writes.length, 2);
+  assert.match(String(writes[0][0]), /INSERT INTO public\.store_discounts/);
+  assert.match(String(writes[1][0]), /INSERT INTO public\.discounts/);
 });
 
 test('WordPress error response body and status are propagated unchanged', async () => {

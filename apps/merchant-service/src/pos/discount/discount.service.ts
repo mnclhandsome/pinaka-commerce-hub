@@ -21,10 +21,11 @@ export class DiscountService implements OnModuleInit {
     await source.initialize();
     try {
       await createMissingTables(source);
-      // Older databases may have the table without the unique index declared by the entity.
-      // Discount writes use ON CONFLICT (store_id), which requires this index.
+      // Existing installations may predate the entity's unique declaration. Snapshot upserts
+      // require one row per store, which is the established store_discounts data model.
       await source.query(`CREATE UNIQUE INDEX IF NOT EXISTS store_discounts_store_id_uq
         ON public.store_discounts (store_id)`);
+      // Keep the queryable per-discount mirror used by discount management screens.
       await source.query(`
         CREATE TABLE IF NOT EXISTS public.discounts (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -40,7 +41,7 @@ export class DiscountService implements OnModuleInit {
       `);
       await source.query(`CREATE UNIQUE INDEX IF NOT EXISTS discounts_store_type_external_id_uq
         ON public.discounts (store_id, discount_type, discount_id)`);
-      // Backfill records already cached in store_discounts so both tables start aligned.
+      // Populate the mirror from existing snapshots without removing or truncating data.
       await source.query(`
         INSERT INTO public.discounts (store_id, discount_type, discount_id, payload)
         SELECT DISTINCT ON (sd.store_id, group_row.key, COALESCE(item.value->>'wordpressId', item.value->>'id', item.value->>'pchId'))
@@ -97,7 +98,8 @@ export class DiscountService implements OnModuleInit {
 
   async list(storeId: string, role?: string, query: Record<string, string> = {}) {
     const connection = await this.requireWordPressConnection(storeId, role);
-    const response = await this.wordpressRequest(connection, 'custom-discount/get-all-discounts-for-admin', 'GET', undefined, query);
+    const { type, ...wordpressQuery } = query;
+    const response = await this.wordpressRequest(connection, 'custom-discount/get-all-discounts-for-admin', 'GET', undefined, wordpressQuery);
     for (const group of ['auto', 'mix_match', 'multipack']) {
       const records = response?.data?.[group];
       if (!Array.isArray(records)) continue;
@@ -109,7 +111,12 @@ export class DiscountService implements OnModuleInit {
         );
       }
     }
-    return response;
+    if (!type) return response;
+    const group = this.discountGroup(type);
+    return {
+      data: Array.isArray(response?.data?.[group]) ? response.data[group] : [],
+      ...(response?.pagination ? { pagination: response.pagination } : {}),
+    };
   }
 
   async listByType(storeId: string, type: string, role?: string, query: Record<string, string> = {}) {
@@ -124,13 +131,12 @@ export class DiscountService implements OnModuleInit {
   async getById(storeId: string, type: string, id: string, role?: string) {
     this.requireDiscountRole(role);
     const group = this.discountGroup(type);
-    const [row] = await this.merchants.requireDataSource().query(
-      `SELECT payload FROM public.discounts
-       WHERE store_id=$1::uuid AND discount_type=$2 AND discount_id=$3 AND COALESCE(is_deleted,false)=false`,
-      [storeId, group, id],
+    const payload = await this.readDiscountPayload(storeId);
+    const record = (payload[group] ?? []).find((item: any) =>
+      String(item.wordpressId ?? item.pchId ?? item.id) === id,
     );
-    if (!row) throw new NotFoundException(`Discount '${id}' not found for type '${group}'`);
-    return row.payload;
+    if (!record) throw new NotFoundException(`Discount '${id}' not found for type '${group}'`);
+    return record;
   }
 
   async listRules(storeId: string, role?: string) {
@@ -168,8 +174,8 @@ export class DiscountService implements OnModuleInit {
     }
     const response = await this.wordpressRequest(connection, 'custom-discount/create-discount', 'POST', body);
     let wordpressId = response.discount_id ?? response.id;
-    // The original Multipack create response intentionally has no ID. Resolve it internally from the
-    // existing list API so PCH can keep the mapping without changing WordPress's public response.
+    // The original Multipack create response has no ID. Resolve it from the existing list API
+    // and add the ID to PCH's response as well as retaining the local mapping.
     if (wordpressId === undefined && group === 'multipack' && previousMultipackIds) {
       try {
         const after = await this.wordpressRequest(connection, 'custom-discount/get-all-discounts-for-admin', 'GET', undefined, { page: '1', per_page: '100' });
@@ -186,7 +192,9 @@ export class DiscountService implements OnModuleInit {
       Object.assign(record, { id: wordpressId, pchId: String(wordpressId), syncStatus: 'SYNCED' });
       await this.persistWithoutChangingResponse(() => this.saveDiscount(connection.storeId, group, record), connection.storeId);
     }
-    return response;
+    return group === 'multipack' && wordpressId !== undefined && wordpressId !== null
+      ? { ...response, id: wordpressId }
+      : response;
   }
 
   async update(storeId: string, type: string, id: string, input: Record<string, any>, role?: string) {
@@ -345,6 +353,10 @@ export class DiscountService implements OnModuleInit {
     await this.merchants.requireDataSource().transaction(async manager => {
       const [row] = await manager.query('SELECT payload FROM public.store_discounts WHERE store_id=$1::uuid AND COALESCE(is_deleted,false)=false FOR UPDATE', [storeId]);
       const payload = row?.payload ?? { auto: [], mix_match: [], multipack: [] };
+      const record = (payload[group] ?? []).find((item: any) => String(item.pchId ?? item.id) === id);
+      const wordpressId = record?.wordpressId ?? record?.id ?? id;
+      await manager.query(`UPDATE public.discounts SET is_deleted=true,updated_at=now()
+        WHERE store_id=$1::uuid AND discount_type=$2 AND discount_id=$3`, [storeId, group, String(wordpressId)]);
       payload[group] = (payload[group] ?? []).filter((item: any) => String(item.pchId ?? item.id) !== id);
       await this.writeDiscountSnapshot(manager, storeId, payload);
     });
@@ -358,7 +370,6 @@ export class DiscountService implements OnModuleInit {
     }
     await manager.query(`INSERT INTO public.store_discounts (store_id,payload) VALUES ($1::uuid,$2::jsonb)
       ON CONFLICT (store_id) DO UPDATE SET payload=EXCLUDED.payload,updated_at=now(),is_deleted=false`, [storeId, JSON.stringify(canonicalPayload)]);
-    await manager.query('DELETE FROM public.discounts WHERE store_id=$1::uuid', [storeId]);
     for (const group of ['auto', 'mix_match', 'multipack']) {
       for (const record of canonicalPayload[group]) {
         const discountId = record.wordpressId ?? record.id ?? record.pchId;
@@ -420,10 +431,12 @@ export class DiscountService implements OnModuleInit {
           payload[group].push(discount);
         }
       }
-      // The plugin reports totals only for mix_match; keep paging auto independently.
-      const auto = body.data.auto ?? [];
-      const mixMatch = body.data.mix_match ?? [];
-      if (auto.length === 0 && mixMatch.length === 0 && !body.pagination?.has_more) {
+      const pageHasRecords = ['auto', 'mix_match', 'multipack'].some(group =>
+        Array.isArray(body.data[group]) && body.data[group].length > 0,
+      );
+      if (body.pagination?.has_more === true) continue;
+      // Some plugin versions omit pagination when every group is empty.
+      if (!pageHasRecords || body.pagination?.has_more === false) {
         completed = true;
         break;
       }
