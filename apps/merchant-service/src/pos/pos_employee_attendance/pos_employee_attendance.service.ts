@@ -60,20 +60,29 @@ export class PosEmployeeAttendanceService implements OnModuleInit {
     };
   }
 
-  async list(identity: PosAttendanceIdentity, filters: PosEmployeeAttendanceQueryDto) {
+  async list(
+    identity: PosAttendanceIdentity,
+    filters: PosEmployeeAttendanceQueryDto,
+  ) {
     const filterMerchantId = filters.resolvedMerchantId;
     const filterStoreId = filters.resolvedStoreId;
     const filterEmployeeCode = filters.resolvedEmployeeCode;
 
     if (filterMerchantId && filterMerchantId !== identity.merchantId) {
-      throw new ForbiddenException({ success: false, message: 'Attendance access is limited to the authenticated merchant' });
+      throw new ForbiddenException({
+        success: false,
+        message: 'Attendance access is limited to the authenticated merchant',
+      });
     }
     if (filterStoreId && filterStoreId !== identity.storeId) {
-      throw new ForbiddenException({ success: false, message: 'Attendance access is limited to the authenticated store' });
+      throw new ForbiddenException({
+        success: false,
+        message: 'Attendance access is limited to the authenticated store',
+      });
     }
-    if (filterEmployeeCode && filterEmployeeCode !== identity.employeeCode) {
-      throw new ForbiddenException({ success: false, message: 'Attendance access is limited to the authenticated employee' });
-    }
+    // if (filterEmployeeCode && filterEmployeeCode !== identity.employeeCode) {
+    //   throw new ForbiddenException({ success: false, message: 'Attendance access is limited to the authenticated employee' });
+    // }
     return {
       success: true,
       ...(await this.attendance.listForEmployee(identity, {
@@ -115,7 +124,13 @@ export class PosEmployeeAttendanceService implements OnModuleInit {
       merchantId,
       storeId,
     );
-    if (!employee || !(await this.attendance.hasActiveStoreAssignment(employee.id, employee.storeId))) {
+    if (
+      !employee ||
+      !(await this.attendance.hasActiveStoreAssignment(
+        employee.id,
+        employee.storeId,
+      ))
+    ) {
       throw new UnauthorizedException({
         success: false,
         message: 'Invalid employee credentials or merchant/store assignment',
@@ -142,7 +157,10 @@ export class PosEmployeeAttendanceService implements OnModuleInit {
       });
     }
     if (!employee.firstName.trim()) {
-      throw new BadRequestException({ success: false, message: 'Employee name is not configured' });
+      throw new BadRequestException({
+        success: false,
+        message: 'Employee name is not configured',
+      });
     }
     return employee;
   }

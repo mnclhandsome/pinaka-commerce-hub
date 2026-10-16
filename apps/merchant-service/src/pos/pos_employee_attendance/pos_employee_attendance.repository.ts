@@ -1,4 +1,9 @@
-import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { MerchantRepository } from '../../modules/merchant/merchant.repository';
 import { ensurePosEmployeeAttendanceSchema } from './pos_employee_attendance.schema';
 
@@ -31,7 +36,9 @@ export interface PosAttendanceListFilters {
 
 @Injectable()
 export class PosEmployeeAttendanceRepository {
-  constructor(@Inject(MerchantRepository) private readonly merchants: MerchantRepository) {}
+  constructor(
+    @Inject(MerchantRepository) private readonly merchants: MerchantRepository,
+  ) {}
 
   private get db() {
     return this.merchants.requireDataSource();
@@ -74,7 +81,10 @@ export class PosEmployeeAttendanceRepository {
     return rows[0] ?? null;
   }
 
-  async hasActiveStoreAssignment(employeeId: string, storeId: string): Promise<boolean> {
+  async hasActiveStoreAssignment(
+    employeeId: string,
+    storeId: string,
+  ): Promise<boolean> {
     const tables = await this.db.query(
       `SELECT to_regclass('public.employee_stores') IS NOT NULL AS "hasEmployeeStores",
               to_regclass('public.employee_store_assignments') IS NOT NULL AS "hasAssignments"`,
@@ -102,13 +112,16 @@ export class PosEmployeeAttendanceRepository {
 
   async clockIn(employee: PosAttendanceEmployee) {
     try {
-      return await this.db.transaction(async manager => {
+      return await this.db.transaction(async (manager) => {
         const locked = await manager.query(
           'SELECT id FROM public.employees WHERE id = $1::uuid FOR UPDATE',
           [employee.id],
         );
         if (!locked.length) {
-          throw new NotFoundException({ success: false, message: 'Employee record is no longer available' });
+          throw new NotFoundException({
+            success: false,
+            message: 'Employee record is no longer available',
+          });
         }
 
         const open = await manager.query(
@@ -117,7 +130,10 @@ export class PosEmployeeAttendanceRepository {
           [employee.id],
         );
         if (open.length) {
-          throw new ConflictException({ success: false, message: 'Employee already has an open attendance session' });
+          throw new ConflictException({
+            success: false,
+            message: 'Employee already has an open attendance session',
+          });
         }
 
         const rows = await manager.query(
@@ -156,20 +172,26 @@ export class PosEmployeeAttendanceRepository {
       });
     } catch (error: unknown) {
       if ((error as { code?: string })?.code === '23505') {
-        throw new ConflictException({ success: false, message: 'Employee already has an open attendance session' });
+        throw new ConflictException({
+          success: false,
+          message: 'Employee already has an open attendance session',
+        });
       }
       throw error;
     }
   }
 
   async clockOut(employee: PosAttendanceEmployee) {
-    return this.db.transaction(async manager => {
+    return this.db.transaction(async (manager) => {
       const locked = await manager.query(
         'SELECT id FROM public.employees WHERE id = $1::uuid FOR UPDATE',
         [employee.id],
       );
       if (!locked.length) {
-        throw new NotFoundException({ success: false, message: 'Employee record is no longer available' });
+        throw new NotFoundException({
+          success: false,
+          message: 'Employee record is no longer available',
+        });
       }
 
       const open = await manager.query(
@@ -183,10 +205,16 @@ export class PosEmployeeAttendanceRepository {
         [employee.id, employee.merchantId, employee.storeId],
       );
       if (!open.length) {
-        throw new NotFoundException({ success: false, message: 'No open attendance session was found' });
+        throw new NotFoundException({
+          success: false,
+          message: 'No open attendance session was found',
+        });
       }
       if (new Date(open[0].clockIn).getTime() > Date.now()) {
-        throw new ConflictException({ success: false, message: 'Clock-out cannot precede clock-in' });
+        throw new ConflictException({
+          success: false,
+          message: 'Clock-out cannot precede clock-in',
+        });
       }
 
       const updated = await manager.query(
@@ -217,7 +245,10 @@ export class PosEmployeeAttendanceRepository {
         [open[0].id],
       );
       if (!updated.length) {
-        throw new ConflictException({ success: false, message: 'Clock-out could not be recorded' });
+        throw new ConflictException({
+          success: false,
+          message: 'Clock-out could not be recorded',
+        });
       }
       return updated[0];
     });
@@ -256,20 +287,30 @@ export class PosEmployeeAttendanceRepository {
     return rows[0] ?? null;
   }
 
-  async listForEmployee(identity: PosAttendanceIdentity, filters: PosAttendanceListFilters) {
-    const values: unknown[] = [identity.merchantId, identity.storeId, identity.employeeId];
-    const where = [
-      'merchant_id::text = $1',
-      'store_id::text = $2',
-      'employee_id::text = $3',
-    ];
+  async listForEmployee(
+    identity: Pick<PosAttendanceIdentity, 'merchantId' | 'storeId'>,
+    filters: PosAttendanceListFilters,
+  ) {
+    return this.listForStore(identity, filters);
+  }
+
+  async listForStore(
+    identity: Pick<PosAttendanceIdentity, 'merchantId' | 'storeId'>,
+    filters: PosAttendanceListFilters,
+  ) {
+    const values: unknown[] = [identity.merchantId, identity.storeId];
+
+    const where = ['merchant_id::text = $1', 'store_id::text = $2'];
+
     if (filters.employeeCode) {
       values.push(filters.employeeCode.trim());
       where.push(`employee_code = $${values.length}`);
     }
     if (filters.date) {
       values.push(filters.date);
-      where.push(`clock_in >= $${values.length}::date AND clock_in < ($${values.length}::date + interval '1 day')`);
+      where.push(
+        `clock_in >= $${values.length}::date AND clock_in < ($${values.length}::date + interval '1 day')`,
+      );
     }
     if (filters.status) {
       values.push(filters.status);

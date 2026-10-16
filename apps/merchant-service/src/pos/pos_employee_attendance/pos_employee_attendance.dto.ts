@@ -6,6 +6,7 @@ import {
   IsOptional,
   IsString,
   Length,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -23,7 +24,7 @@ export class PosEmployeeAttendanceClockDto {
   employee_code?: string;
 
   @IsString()
-  @Length(4, 8)
+  @Matches(/^\d{6}$/)
   pin!: string;
 
   @IsOptional()
