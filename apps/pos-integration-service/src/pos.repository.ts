@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { DataSource, Repository } from 'typeorm';
 import Redis from 'ioredis';
 import { connectPostgres, createMissingTables } from '@pinaka-delivery-hub/database';
-import { PosShiftEntity, ShiftDenominationData, ShiftStatus } from './entities/pos-shift.entity';
+import { PosShiftEntity, ShiftCloseData, ShiftDenominationData, ShiftStatus } from './entities/pos-shift.entity';
 import { CashMovementEntity, MovementType } from './entities/cash-movement.entity';
 
 async function ensurePosShiftSnakeCaseSchema(dataSource: DataSource): Promise<void> {
@@ -19,6 +19,7 @@ async function ensurePosShiftSnakeCaseSchema(dataSource: DataSource): Promise<vo
         opening_device_id UUID,
         opened_by_employee_id UUID,
         closed_by_employee_id UUID,
+        closed_by_device_id VARCHAR(100),
         shift_number VARCHAR(100),
         cashier_name VARCHAR(150) NOT NULL,
         opening_cash DECIMAL(10,2) DEFAULT 200.00,
@@ -26,6 +27,15 @@ async function ensurePosShiftSnakeCaseSchema(dataSource: DataSource): Promise<vo
         total_card_sales DECIMAL(10,2) DEFAULT 0.00,
         total_safe_drops DECIMAL(10,2) DEFAULT 0.00,
         total_paid_outs DECIMAL(10,2) DEFAULT 0.00,
+        total_orders INTEGER DEFAULT 0,
+        total_order_sale_amount DECIMAL(12,2) DEFAULT 0.00,
+        total_cashback DECIMAL(10,2) DEFAULT 0.00,
+        total_payouts DECIMAL(10,2) DEFAULT 0.00,
+        total_ebt_sales DECIMAL(10,2) DEFAULT 0.00,
+        total_pay_later DECIMAL(10,2) DEFAULT 0.00,
+        total_refunds DECIMAL(10,2) DEFAULT 0.00,
+        total_cancelled_orders INTEGER DEFAULT 0,
+        total_void_items INTEGER DEFAULT 0,
         drawer_denominations JSONB,
         drawer_total_amount DECIMAL(12,2),
         tube_denominations JSONB,
@@ -55,6 +65,7 @@ async function ensurePosShiftSnakeCaseSchema(dataSource: DataSource): Promise<vo
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS opening_device_id UUID;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS opened_by_employee_id UUID;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS closed_by_employee_id UUID;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS closed_by_device_id VARCHAR(100);
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS shift_number VARCHAR(100);
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS cashier_name VARCHAR(150);
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS opening_cash DECIMAL(10,2) DEFAULT 200.00;
@@ -62,6 +73,15 @@ async function ensurePosShiftSnakeCaseSchema(dataSource: DataSource): Promise<vo
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_card_sales DECIMAL(10,2) DEFAULT 0.00;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_safe_drops DECIMAL(10,2) DEFAULT 0.00;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_paid_outs DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_orders INTEGER DEFAULT 0;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_order_sale_amount DECIMAL(12,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_cashback DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_payouts DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_ebt_sales DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_pay_later DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_refunds DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_cancelled_orders INTEGER DEFAULT 0;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_void_items INTEGER DEFAULT 0;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS drawer_denominations JSONB;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS drawer_total_amount DECIMAL(12,2);
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS tube_denominations JSONB;
@@ -259,6 +279,15 @@ export class PosRepository implements OnModuleInit {
       totalCardSales: 0.00,
       totalSafeDrops: 0.00,
       totalPaidOuts: 0.00,
+      total_orders: 0,
+      total_order_sale_amount: 0.00,
+      total_cashback: 0.00,
+      total_payouts: 0.00,
+      total_ebt_sales: 0.00,
+      total_pay_later: 0.00,
+      total_refunds: 0.00,
+      total_cancelled_orders: 0,
+      total_void_items: 0,
       ...denominationData,
       status: ShiftStatus.OPEN,
       openedAt: new Date(),
@@ -315,7 +344,19 @@ export class PosRepository implements OnModuleInit {
   }
 
   // --- Close Shift & Generate Z-Report ---
-  async closeShift(shiftId: string, closingCashActual: number, closedByEmployeeId?: string): Promise<{ success: boolean; shift?: PosShiftEntity; message?: string }> {
+  async closeShift(
+    shiftId: string,
+    closingCashActual: number,
+    closedByEmployeeId?: string,
+    closeData: ShiftCloseData = {},
+  ): Promise<{ success: boolean; shift?: PosShiftEntity; message?: string }> {
+    const applyCloseData = (target: PosShiftEntity) => {
+      if (closedByEmployeeId) target.closedByEmployeeId = closedByEmployeeId;
+      for (const [key, value] of Object.entries(closeData)) {
+        if (value !== undefined) Object.assign(target, { [key]: value });
+      }
+    };
+
     let shift: PosShiftEntity | null = null;
 
     if (this.isDbConnected && this.shiftRepo) {
@@ -332,7 +373,7 @@ export class PosRepository implements OnModuleInit {
         shift.discrepancy = Number(closingCashActual) - expected;
         shift.status = ShiftStatus.CLOSED;
         shift.closedAt = new Date();
-        if (closedByEmployeeId) shift.closedByEmployeeId = closedByEmployeeId;
+        applyCloseData(shift);
         shift = await this.shiftRepo.save(shift);
       }
     } else {
@@ -344,7 +385,7 @@ export class PosRepository implements OnModuleInit {
         shift.discrepancy = Number(closingCashActual) - expected;
         shift.status = ShiftStatus.CLOSED;
         shift.closedAt = new Date();
-        if (closedByEmployeeId) shift.closedByEmployeeId = closedByEmployeeId;
+        applyCloseData(shift);
       }
     }
 
@@ -364,6 +405,18 @@ export class PosRepository implements OnModuleInit {
     }
     return this.inMemoryShifts
       .filter((shift) => shift.storeId === storeId && shift.status === ShiftStatus.OPEN)
+      .sort((left, right) => right.openedAt.getTime() - left.openedAt.getTime());
+  }
+  async getShiftsByMerchantStore(merchantId: string, storeId: string): Promise<PosShiftEntity[]> {
+    if (this.isDbConnected && this.shiftRepo) {
+      const shifts = await this.shiftRepo.find({
+        where: { merchantId, storeId },
+        order: { openedAt: 'DESC', createdAt: 'DESC' },
+      });
+      return this.withOrderSales(shifts);
+    }
+    return this.inMemoryShifts
+      .filter(shift => shift.merchantId === merchantId && shift.storeId === storeId)
       .sort((left, right) => right.openedAt.getTime() - left.openedAt.getTime());
   }
 
@@ -465,6 +518,7 @@ export class PosRepository implements OnModuleInit {
       opening_device_id: shift.openingDeviceId,
       opened_by_employee_id: shift.openedByEmployeeId,
       closed_by_employee_id: shift.closedByEmployeeId,
+      closed_by_device_id: shift.closed_by_device_id,
       shift_number: shift.shiftNumber,
       cashier_name: shift.cashierName,
       opening_cash: shift.openingCash,
@@ -472,6 +526,15 @@ export class PosRepository implements OnModuleInit {
       total_card_sales: shift.totalCardSales,
       total_safe_drops: shift.totalSafeDrops,
       total_paid_outs: shift.totalPaidOuts,
+      total_orders: shift.total_orders,
+      total_order_sale_amount: shift.total_order_sale_amount,
+      total_cashback: shift.total_cashback,
+      total_payouts: shift.total_payouts,
+      total_ebt_sales: shift.total_ebt_sales,
+      total_pay_later: shift.total_pay_later,
+      total_refunds: shift.total_refunds,
+      total_cancelled_orders: shift.total_cancelled_orders,
+      total_void_items: shift.total_void_items,
       drawer_denominations: shift.drawer_denominations,
       drawer_total_amount: shift.drawer_total_amount,
       tube_denominations: shift.tube_denominations,

@@ -25,6 +25,19 @@ export interface ShiftDenominationData {
   total_amount?: number;
 }
 
+export interface ShiftCloseData {
+  closed_by_device_id?: string;
+  total_orders?: number;
+  total_order_sale_amount?: number;
+  total_cashback?: number;
+  total_payouts?: number;
+  total_ebt_sales?: number;
+  total_pay_later?: number;
+  total_refunds?: number;
+  total_cancelled_orders?: number;
+  total_void_items?: number;
+}
+
 @Entity('pos_shifts')
 export class PosShiftEntity {
   @PrimaryColumn({ type: 'varchar', length: 100 })
@@ -51,6 +64,9 @@ export class PosShiftEntity {
   @Column({ name: 'closed_by_employee_id', type: 'uuid', nullable: true })
   closedByEmployeeId?: string;
 
+  @Column({ name: 'closed_by_device_id', type: 'varchar', length: 100, nullable: true })
+  closed_by_device_id?: string;
+
   @Column({ name: 'shift_number', type: 'varchar', length: 100, nullable: true })
   shiftNumber?: string;
 
@@ -71,6 +87,33 @@ export class PosShiftEntity {
 
   @Column({ name: 'total_paid_outs', type: 'decimal', precision: 10, scale: 2, default: 0.00 })
   totalPaidOuts!: number;
+
+  @Column({ name: 'total_orders', type: 'integer', default: 0 })
+  total_orders!: number;
+
+  @Column({ name: 'total_order_sale_amount', type: 'decimal', precision: 12, scale: 2, default: 0.00 })
+  total_order_sale_amount!: number;
+
+  @Column({ name: 'total_cashback', type: 'decimal', precision: 10, scale: 2, default: 0.00 })
+  total_cashback!: number;
+
+  @Column({ name: 'total_payouts', type: 'decimal', precision: 10, scale: 2, default: 0.00 })
+  total_payouts!: number;
+
+  @Column({ name: 'total_ebt_sales', type: 'decimal', precision: 10, scale: 2, default: 0.00 })
+  total_ebt_sales!: number; // Paid by EBT
+
+  @Column({ name: 'total_pay_later', type: 'decimal', precision: 10, scale: 2, default: 0.00 })
+  total_pay_later!: number;
+
+  @Column({ name: 'total_refunds', type: 'decimal', precision: 10, scale: 2, default: 0.00 })
+  total_refunds!: number;
+
+  @Column({ name: 'total_cancelled_orders', type: 'integer', default: 0 })
+  total_cancelled_orders!: number;
+
+  @Column({ name: 'total_void_items', type: 'integer', default: 0 })
+  total_void_items!: number;
 
   @Column({ name: 'drawer_denominations', type: 'jsonb', nullable: true })
   drawer_denominations?: DrawerDenomination[];

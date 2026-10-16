@@ -32,6 +32,7 @@ async function migrateDatabase(dbName) {
         opening_device_id UUID,
         opened_by_employee_id UUID,
         closed_by_employee_id UUID,
+        closed_by_device_id VARCHAR(100),
         shift_number VARCHAR(100),
         cashier_name VARCHAR(150) NOT NULL,
         opening_cash DECIMAL(10,2) DEFAULT 200.00,
@@ -39,6 +40,15 @@ async function migrateDatabase(dbName) {
         total_card_sales DECIMAL(10,2) DEFAULT 0.00,
         total_safe_drops DECIMAL(10,2) DEFAULT 0.00,
         total_paid_outs DECIMAL(10,2) DEFAULT 0.00,
+        total_orders INTEGER DEFAULT 0,
+        total_order_sale_amount DECIMAL(12,2) DEFAULT 0.00,
+        total_cashback DECIMAL(10,2) DEFAULT 0.00,
+        total_payouts DECIMAL(10,2) DEFAULT 0.00,
+        total_ebt_sales DECIMAL(10,2) DEFAULT 0.00,
+        total_pay_later DECIMAL(10,2) DEFAULT 0.00,
+        total_refunds DECIMAL(10,2) DEFAULT 0.00,
+        total_cancelled_orders INTEGER DEFAULT 0,
+        total_void_items INTEGER DEFAULT 0,
         drawer_denominations JSONB,
         drawer_total_amount DECIMAL(12,2),
         tube_denominations JSONB,
@@ -68,6 +78,7 @@ async function migrateDatabase(dbName) {
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS opening_device_id UUID;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS opened_by_employee_id UUID;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS closed_by_employee_id UUID;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS closed_by_device_id VARCHAR(100);
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS shift_number VARCHAR(100);
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS cashier_name VARCHAR(150);
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS opening_cash DECIMAL(10,2) DEFAULT 200.00;
@@ -75,6 +86,15 @@ async function migrateDatabase(dbName) {
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_card_sales DECIMAL(10,2) DEFAULT 0.00;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_safe_drops DECIMAL(10,2) DEFAULT 0.00;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_paid_outs DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_orders INTEGER DEFAULT 0;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_order_sale_amount DECIMAL(12,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_cashback DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_payouts DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_ebt_sales DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_pay_later DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_refunds DECIMAL(10,2) DEFAULT 0.00;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_cancelled_orders INTEGER DEFAULT 0;
+      ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS total_void_items INTEGER DEFAULT 0;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS drawer_denominations JSONB;
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS drawer_total_amount DECIMAL(12,2);
       ALTER TABLE public.pos_shifts ADD COLUMN IF NOT EXISTS tube_denominations JSONB;
