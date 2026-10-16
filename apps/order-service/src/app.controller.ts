@@ -110,7 +110,7 @@ export class AppController {
     @Query('store_id') storeIdSnake?: string,
   ) {
     if (['completed-orders', 'full-order-refund', 'partial-order-refund', 'get-amt-by-paymethod', 'refund-valid-user', 'health', 'calculations'].includes(id)) {
-      throw new NotFoundException(Endpoint '\x27 not found);
+      throw new NotFoundException(`Endpoint '${id}' not found`);
     }
     const data = await this.orderRepository.getOrderDetails(id, storeHeader || storeId || storeIdSnake);
     if (!data) throw new NotFoundException(`Order '${id}' not found`);
