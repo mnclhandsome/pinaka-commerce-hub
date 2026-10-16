@@ -15,7 +15,9 @@ async function bootstrap() {
     bodyParser: false,
   });
   app.useBodyParser('json', {
-    limit: '3mb',
+    // Safe-drop denomination images are Base64 in JSON and can expand to
+    // several megabytes per configuration. Keep this aligned with Nginx's 20M cap.
+    limit: '50mb',
     verify: (req: { rawBody?: Buffer }, _res: unknown, buffer: Buffer) => {
       req.rawBody = Buffer.from(buffer);
     },
