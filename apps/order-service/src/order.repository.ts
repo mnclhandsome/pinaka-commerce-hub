@@ -1004,11 +1004,16 @@ export class OrderRepository implements OnModuleInit {
   }
 
   async listOrders(criteria: {
+    merchantId?: string;
     storeId?: string;
     page: number;
     perPage: number;
     statuses: string[];
     createdVia?: string;
+    author?: string;
+    after?: Date;
+    before?: Date;
+    orderBy?: 'created' | 'modified';
   }): Promise<{
     total: number;
     orders: Array<{
@@ -1016,6 +1021,7 @@ export class OrderRepository implements OnModuleInit {
       storeOrder: StoreOrderEntity | null;
       items: OrderItemEntity[];
       products: Map<string, unknown>;
+      refunds: Array<{ amount: unknown; metadata: Record<string, unknown> | null }>;
     }>;
   }> {
     if (!this.isDbConnected || !this.dataSource || !this.orderRepo) {
@@ -1023,26 +1029,30 @@ export class OrderRepository implements OnModuleInit {
     }
     const statuses = criteria.statuses.length ? criteria.statuses : null;
     const createdVia = criteria.createdVia?.trim().toLowerCase() || null;
+    const author = criteria.author?.trim() || null;
+    const merchantId = criteria.merchantId || null;
     const storeId = criteria.storeId || null;
-    const params: unknown[] = [storeId, statuses, createdVia];
+    const params: unknown[] = [merchantId, storeId, statuses, createdVia, author, criteria.after || null, criteria.before || null];
     const where = `
       FROM public.orders AS sale
       LEFT JOIN public.store_orders AS store_sale ON store_sale.order_id = sale.id
-      WHERE ($1::uuid IS NULL OR sale.store_id = $1::uuid)
+      WHERE ($1::uuid IS NULL OR sale.merchant_id = $1::uuid)
+        AND ($2::uuid IS NULL OR sale.store_id = $2::uuid)
         AND (
-          $2::text[] IS NULL
+          $3::text[] IS NULL
           OR (
             CASE
               WHEN NULLIF(store_sale.status, '') IS NOT NULL THEN lower(store_sale.status)
               WHEN upper(sale.order_status) = 'CANCELLED' THEN 'cancelled'
               WHEN upper(sale.order_status) = 'COMPLETED' THEN 'completed'
+              WHEN upper(sale.order_status) = 'PARTIAL_REFUND' THEN 'partial-refund'
               WHEN upper(sale.order_status) = 'REFUNDED' THEN 'refunded'
               ELSE 'processing'
             END
-          ) = ANY($2::text[])
+          ) = ANY($3::text[])
         )
         AND (
-          $3::text IS NULL
+          $4::text IS NULL
           OR lower(COALESCE(
             NULLIF(sale.request_payload->>'created_via', ''),
             NULLIF((
@@ -1052,20 +1062,36 @@ export class OrderRepository implements OnModuleInit {
               LIMIT 1
             ), ''),
             'rest-api'
-          )) = $3
+          )) = $4
         )
+        AND (
+          $5::text IS NULL
+          OR COALESCE(
+            NULLIF(store_sale.placed_by, ''),
+            NULLIF((
+              SELECT entry->>'value'
+              FROM jsonb_array_elements(COALESCE(sale.metadata, '[]'::jsonb)) AS entry
+              WHERE entry->>'key' IN ('_wc_order_created_by', 'pos_placed_by', 'author')
+              LIMIT 1
+            ), ''),
+            NULLIF(sale.request_payload->>'author', '')
+          ) = $5
+        )
+        AND ($6::timestamptz IS NULL OR sale.updated_at >= $6::timestamptz)
+        AND ($7::timestamptz IS NULL OR sale.updated_at <= $7::timestamptz)
     `;
     let countRows: Array<{ total?: number }>;
     let idRows: Array<{ id: string }>;
     try {
       countRows = await this.dataSource.query(`SELECT COUNT(*)::int AS total ${where}`, params);
+      const orderColumn = criteria.orderBy === 'modified' ? 'sale.updated_at' : 'sale.created_at';
       idRows = await this.dataSource.query(
-        `SELECT sale.id ${where} ORDER BY sale.created_at DESC LIMIT $4 OFFSET $5`,
+        `SELECT sale.id ${where} ORDER BY ${orderColumn} DESC LIMIT $8 OFFSET $9`,
         [...params, criteria.perPage, (criteria.page - 1) * criteria.perPage],
       );
     } catch (error: unknown) {
       if (error instanceof QueryFailedError && (error as { driverError?: { code?: string } }).driverError?.code === '22P02') {
-        throw new BadRequestException('storeId must be a UUID');
+        throw new BadRequestException('x-merchant-id and x-store-id must be UUIDs');
       }
       throw error;
     }
@@ -1079,6 +1105,21 @@ export class OrderRepository implements OnModuleInit {
     const items = this.itemRepo
       ? await this.itemRepo.find({ where: { orderId: In(ids) } })
       : [];
+    const refundRows: Array<{
+      order_id: string;
+      amount: unknown;
+      metadata: Record<string, unknown> | null;
+    }> = await this.dataSource.query(
+      `SELECT order_id::text AS order_id, amount, metadata
+         FROM public.store_pos_payments
+        WHERE order_id = ANY($1::uuid[])
+          AND entry_type = 'refund'
+          AND is_void = false
+          AND deleted_at IS NULL
+          AND lower(COALESCE(status, 'completed')) NOT IN ('failed', 'cancelled')
+        ORDER BY created_at ASC`,
+      [ids],
+    );
     const ordersById = new Map(orders.map((order) => [order.id, order]));
     const storeOrdersById = new Map(storeOrders.map((storeOrder) => [storeOrder.orderId, storeOrder]));
     const rows = ids.flatMap((id) => {
@@ -1088,6 +1129,9 @@ export class OrderRepository implements OnModuleInit {
         order,
         storeOrder: storeOrdersById.get(id) ?? null,
         items: items.filter((item) => item.orderId === id),
+        refunds: refundRows
+          .filter((refund) => refund.order_id === id)
+          .map(({ amount, metadata }) => ({ amount, metadata })),
       }];
     });
     await this.enrichCustomItemTaxesForListing(rows);
@@ -1402,6 +1446,8 @@ export class OrderRepository implements OnModuleInit {
          payment.amount,
          payment.order_total,
          payment.remaining,
+         payment.refund_amount,
+         payment.balance_amount,
          payment.currency,
          payment.status,
          payment.entry_type,
@@ -1421,6 +1467,443 @@ export class OrderRepository implements OnModuleInit {
         storeId,
         error,
       });
+      throw error;
+    }
+  }
+
+  async getRefundAmountContext(clientOrderId: string, merchantId: string, storeId: string) {
+    if (!this.isDbConnected || !this.dataSource) {
+      throw new ServiceUnavailableException('Order database is unavailable');
+    }
+    let rows: Array<{ id: string }>;
+    try {
+      rows = await this.dataSource.query(
+        `SELECT sale.id
+           FROM public.orders AS sale
+          WHERE sale.merchant_id = $1::uuid
+            AND sale.store_id = $2::uuid
+            AND (
+              sale.client_order_id = $3
+              OR sale.id::text = $3
+              OR sale.order_number = $3
+            )
+          ORDER BY sale.created_at DESC
+          LIMIT 1`,
+        [merchantId, storeId, clientOrderId],
+      );
+    } catch (error: unknown) {
+      if (error instanceof QueryFailedError && (error as { driverError?: { code?: string } }).driverError?.code === '22P02') {
+        throw new BadRequestException('x-merchant-id and x-store-id must be UUIDs');
+      }
+      throw error;
+    }
+    if (!rows[0]) return null;
+    const graph = await this.getOrderById(rows[0].id);
+    if (!graph) return null;
+
+    const payments = await this.dataSource.query(
+      `SELECT id::text AS id, payment_method, amount, entry_type, is_void
+         FROM public.store_pos_payments
+        WHERE order_id = $1::uuid
+          AND merchant_id = $2::uuid
+          AND store_id = $3::uuid
+          AND deleted_at IS NULL
+          AND lower(COALESCE(status, 'completed')) NOT IN ('failed', 'cancelled')
+        ORDER BY payment_at ASC, created_at ASC`,
+      [graph.order.id, merchantId, storeId],
+    );
+    let discountPayload: Record<string, unknown> = {};
+    try {
+      const discountRows = await this.dataSource.query(
+        `SELECT payload FROM public.store_discounts
+          WHERE store_id = $1::uuid AND COALESCE(is_deleted, false) = false
+          LIMIT 1`,
+        [storeId],
+      );
+      discountPayload = discountRows[0]?.payload || {};
+    } catch (error: unknown) {
+      const code = error instanceof QueryFailedError
+        ? (error as { driverError?: { code?: string } }).driverError?.code
+        : undefined;
+      if (code !== '42P01' && code !== '42703') throw error;
+    }
+    return { ...graph, payments, discountPayload };
+  }
+
+  async createFullOrderRefund(input: {
+    clientOrderId: string;
+    merchantId: string;
+    storeId: string;
+    requestedAmount: number;
+    reason: string;
+    restock: boolean;
+    performedBy: string;
+  }) {
+    if (!this.isDbConnected || !this.dataSource) {
+      throw new ServiceUnavailableException('Order database is unavailable');
+    }
+    try {
+      return await this.dataSource.transaction(async manager => {
+        const rows = await manager.query(
+          `SELECT sale.id, sale.order_number, sale.total_amount, sale.order_status,
+                  sale.payment_method, store_sale.currency
+             FROM public.orders AS sale
+             LEFT JOIN public.store_orders AS store_sale ON store_sale.order_id = sale.id
+            WHERE sale.merchant_id = $1::uuid
+              AND sale.store_id = $2::uuid
+              AND (
+                sale.client_order_id = $3
+                OR sale.id::text = $3
+                OR sale.order_number = $3
+              )
+            ORDER BY sale.created_at DESC
+            LIMIT 1
+            FOR UPDATE OF sale`,
+          [input.merchantId, input.storeId, input.clientOrderId],
+        );
+        const order = rows[0];
+        if (!order) return { kind: 'missing' as const };
+
+        const refundRows = await manager.query(
+          `SELECT COALESCE(SUM(amount), 0)::numeric AS refunded
+             FROM public.store_pos_payments
+            WHERE order_id = $1::uuid
+              AND entry_type = 'refund'
+              AND is_void = false
+              AND deleted_at IS NULL
+              AND lower(COALESCE(status, 'completed')) NOT IN ('failed', 'cancelled')`,
+          [order.id],
+        );
+        const orderTotal = Number(order.total_amount || 0);
+        const alreadyRefunded = Number(refundRows[0]?.refunded || 0);
+        const remaining = Math.max(0, orderTotal - alreadyRefunded);
+        if (remaining <= 0) return { kind: 'already_refunded' as const };
+        const refundedAmount = Math.min(Math.abs(input.requestedAmount), remaining);
+        const paymentRows = await manager.query(
+          `SELECT payment_method
+             FROM public.store_pos_payments
+            WHERE order_id = $1::uuid
+              AND entry_type = 'payment'
+              AND is_void = false
+              AND deleted_at IS NULL
+            ORDER BY payment_at ASC, created_at ASC
+            LIMIT 1`,
+          [order.id],
+        );
+        const paymentMethod = String(paymentRows[0]?.payment_method || order.payment_method || 'Cash');
+        const lineItems = await manager.query(
+          `SELECT id, product_id, product_name, quantity
+             FROM public.order_line_items
+            WHERE order_id = $1::uuid`,
+          [order.id],
+        );
+        const refundId = randomUUID();
+        const remainingAfter = Math.max(0, remaining - refundedAmount);
+        const metadata = {
+          reason: input.reason,
+          restock: input.restock,
+          performed_by: input.performedBy,
+          line_items: lineItems.map((item: any) => ({
+            order_item_id: item.id,
+            product_id: item.product_id,
+            quantity: Number(item.quantity || 0),
+          })),
+        };
+        await manager.query(
+          `INSERT INTO public.store_pos_payments (
+             id, order_id, merchant_id, store_id, local_id, client_order_id,
+             user_id, payment_type, payment_method, payment_method_title,
+             amount, order_total, remaining, refund_amount, balance_amount,
+             currency, status, entry_type,
+             payment_at, metadata, raw_payload
+           ) VALUES (
+             $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6,
+             $7, 'pos_payment', $8, $8,
+             $9, $10, $11, $12, $13, $14, 'completed', 'refund',
+             now(), $15::jsonb, $16::jsonb
+           )`,
+          [
+            refundId, order.id, input.merchantId, input.storeId, `refund:${refundId}`,
+            input.clientOrderId, input.performedBy, paymentMethod, refundedAmount,
+            orderTotal, remainingAfter, refundedAmount, remainingAfter, order.currency || null,
+            JSON.stringify(metadata), JSON.stringify({
+              order_id: input.clientOrderId,
+              amount: input.requestedAmount,
+              reason: input.reason,
+              items_reusable: input.restock ? 'yes' : 'no',
+            }),
+          ],
+        );
+        await manager.query(
+          `UPDATE public.orders
+              SET order_status = 'REFUNDED', payment_status = 'REFUNDED', updated_at = now()
+            WHERE id = $1::uuid`,
+          [order.id],
+        );
+        await manager.query(
+          `UPDATE public.store_orders SET status = 'refunded', updated_at = now()
+            WHERE order_id = $1::uuid`,
+          [order.id],
+        );
+        await manager.query(
+          `INSERT INTO public.order_status_history
+             (id, order_id, from_status, to_status, changed_by, reason, created_at)
+           VALUES ($1, $2::uuid, $3, 'REFUNDED', $4, $5, now())`,
+          [`HST-${refundId}`, order.id, String(order.order_status || 'COMPLETED'), input.performedBy, input.reason],
+        );
+
+        if (input.restock && lineItems.length) {
+          const columns = await manager.query(
+            `SELECT column_name FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'inventory_items'`,
+          );
+          const names = new Set(columns.map((column: any) => String(column.column_name)));
+          const supportsPosInventory = ['storeId', 'productId', 'quantityOnHand', 'quantityAvailable', 'updatedAt']
+            .every((name) => names.has(name));
+          if (supportsPosInventory) {
+            for (const [index, item] of lineItems.entries()) {
+              const updated = await manager.query(
+                `UPDATE public.inventory_items
+                    SET "quantityOnHand" = "quantityOnHand" + $3,
+                        "quantityAvailable" = "quantityAvailable" + $3,
+                        "updatedAt" = now()
+                  WHERE "storeId" = $1 AND "productId" = $2
+                  RETURNING "quantityAvailable" AS quantity_available`,
+                [input.storeId, String(item.product_id), Number(item.quantity || 0)],
+              );
+              const updatedRows = Array.isArray(updated[0]) ? updated[0] : updated;
+              if (updatedRows[0]) {
+                const available = Number(updatedRows[0].quantity_available || 0);
+                await manager.query(
+                  `INSERT INTO public.inventory_adjustments
+                     (id, "storeId", "productId", "adjustmentType", "quantityChanged",
+                      "newQuantityAvailable", "performedBy", reason, "createdAt")
+                   VALUES ($1, $2, $3, 'REFUND_RESTOCK', $4, $5, $6, $7, now())
+                   ON CONFLICT (id) DO NOTHING`,
+                  [`ADJ-REFUND-${refundId}-${index + 1}`, input.storeId, String(item.product_id),
+                    Number(item.quantity || 0), available, input.performedBy,
+                    `Full refund ${refundId}: ${input.reason}`],
+                );
+                await this.cacheInventoryStock(input.storeId, String(item.product_id), available);
+              }
+            }
+          }
+        }
+
+        return {
+          kind: 'created' as const,
+          orderId: order.id,
+          orderNumber: String(order.order_number || ''),
+          paymentMethod,
+          refundedAmount,
+          refundId,
+        };
+      });
+    } catch (error: unknown) {
+      if (error instanceof QueryFailedError && (error as { driverError?: { code?: string } }).driverError?.code === '22P02') {
+        throw new BadRequestException('x-merchant-id and x-store-id must be UUIDs');
+      }
+      throw error;
+    }
+  }
+
+  async createPartialOrderRefund(input: {
+    clientOrderId: string;
+    merchantId: string;
+    storeId: string;
+    reason: string;
+    restock: boolean;
+    performedBy: string;
+    items: Array<{ orderItemId: string; quantity: number; refundableAmount: number }>;
+  }) {
+    if (!this.isDbConnected || !this.dataSource) {
+      throw new ServiceUnavailableException('Order database is unavailable');
+    }
+    try {
+      return await this.dataSource.transaction(async manager => {
+        const rows = await manager.query(
+          `SELECT sale.id, sale.order_number, sale.total_amount, sale.order_status,
+                  sale.payment_method, store_sale.currency, store_sale.line_items
+             FROM public.orders AS sale
+             LEFT JOIN public.store_orders AS store_sale ON store_sale.order_id = sale.id
+            WHERE sale.merchant_id = $1::uuid
+              AND sale.store_id = $2::uuid
+              AND (sale.client_order_id = $3 OR sale.id::text = $3 OR sale.order_number = $3)
+            ORDER BY sale.created_at DESC
+            LIMIT 1
+            FOR UPDATE OF sale`,
+          [input.merchantId, input.storeId, input.clientOrderId],
+        );
+        const order = rows[0];
+        if (!order) return { kind: 'missing' as const };
+        const refundRows = await manager.query(
+          `SELECT id::text AS id, amount, metadata
+             FROM public.store_pos_payments
+            WHERE order_id = $1::uuid AND entry_type = 'refund' AND is_void = false
+              AND deleted_at IS NULL
+              AND lower(COALESCE(status, 'completed')) NOT IN ('failed', 'cancelled')
+            ORDER BY created_at ASC`,
+          [order.id],
+        );
+        const orderTotal = Number(order.total_amount || 0);
+        const alreadyRefunded = refundRows.reduce((sum: number, row: any) => sum + Number(row.amount || 0), 0);
+        const remainingOrderAmount = Math.max(0, orderTotal - alreadyRefunded);
+        if (remainingOrderAmount <= 0) return { kind: 'already_refunded' as const };
+
+        const entityLines = await manager.query(
+          `SELECT id, product_id, product_name, quantity, total_price, modifiers
+             FROM public.order_line_items WHERE order_id = $1::uuid`,
+          [order.id],
+        );
+        const storedLines = Array.isArray(order.line_items) ? order.line_items : [];
+        const allLines = storedLines.length ? storedLines : entityLines;
+        const positiveTotal = allLines.reduce((sum: number, line: any) => {
+          const value = Number(line.total ?? line.total_price ?? 0);
+          return value > 0 ? sum + value : sum;
+        }, 0);
+        const payoutTotal = allLines.reduce((sum: number, line: any) => {
+          const value = Number(line.total ?? line.total_price ?? 0);
+          return value < 0 ? sum + Math.abs(value) : sum;
+        }, 0);
+        const payoutRatio = positiveTotal > 0 && payoutTotal > 0 ? payoutTotal / positiveTotal : 0;
+        const previousItems = refundRows.flatMap((row: any) =>
+          Array.isArray(row.metadata?.line_items) ? row.metadata.line_items : [],
+        );
+        const refundItems: Array<Record<string, unknown>> = [];
+        let refundTotal = 0;
+        for (const requested of input.items) {
+          // Orders imported from POS can contain two representations of the same
+          // lines: the store_orders JSON snapshot and canonical order_line_items.
+          // Their IDs are not guaranteed to be identical. Completed-orders can
+          // expose either one, so refund validation must accept both sources.
+          const line = storedLines.find((candidate: any) => String(candidate?.id ?? '') === requested.orderItemId)
+            || entityLines.find((candidate: any) => String(candidate?.id ?? '') === requested.orderItemId);
+          if (!line) return { kind: 'invalid_item' as const };
+          const maxQuantity = Number(line.quantity || 0);
+          const refundedQuantity = previousItems
+            .filter((item: any) => String(item?.order_item_id ?? '') === requested.orderItemId)
+            .reduce((sum: number, item: any) => sum + Number(item.quantity ?? item.qty ?? 0), 0);
+          const remainingQuantity = Math.max(0, maxQuantity - refundedQuantity);
+          if (requested.quantity > remainingQuantity) {
+            return { kind: 'qty_error' as const, remainingQuantity };
+          }
+          const adjustedAmount = Math.max(0, requested.refundableAmount * (1 - payoutRatio));
+          refundTotal += adjustedAmount;
+          refundItems.push({
+            order_item_id: requested.orderItemId,
+            product_id: line.variation_id || line.product_id || line.productId || null,
+            name: line.name || line.product_name || '',
+            quantity: requested.quantity,
+            refundable_amount: requested.refundableAmount,
+            refund_total: Math.round(adjustedAmount * 100) / 100,
+          });
+        }
+        refundTotal = Math.round(refundTotal * 100) / 100;
+        if (refundTotal <= 0) return { kind: 'invalid_amount' as const };
+        if (refundTotal > remainingOrderAmount) return { kind: 'exceeds_remaining' as const };
+
+        const paymentRows = await manager.query(
+          `SELECT payment_method FROM public.store_pos_payments
+            WHERE order_id = $1::uuid AND entry_type = 'payment' AND is_void = false AND deleted_at IS NULL
+            ORDER BY payment_at ASC, created_at ASC LIMIT 1`,
+          [order.id],
+        );
+        const paymentMethod = String(paymentRows[0]?.payment_method || order.payment_method || 'Cash');
+        const refundId = randomUUID();
+        const remainingAfter = Math.max(0, remainingOrderAmount - refundTotal);
+        const metadata = {
+          reason: input.reason,
+          restock: input.restock,
+          performed_by: input.performedBy,
+          refund_type: 'partial',
+          line_items: refundItems,
+        };
+        await manager.query(
+          `INSERT INTO public.store_pos_payments (
+             id, order_id, merchant_id, store_id, local_id, client_order_id,
+             user_id, payment_type, payment_method, payment_method_title,
+             amount, order_total, remaining, refund_amount, balance_amount,
+             currency, status, entry_type,
+             payment_at, metadata, raw_payload
+           ) VALUES (
+             $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6,
+             $7, 'pos_payment', $8, $8, $9, $10, $11, $12, $13, $14,
+             'completed', 'refund', now(), $15::jsonb, $16::jsonb
+           )`,
+          [refundId, order.id, input.merchantId, input.storeId, `refund:${refundId}`,
+            input.clientOrderId, input.performedBy, paymentMethod, refundTotal,
+            orderTotal, remainingAfter, refundTotal, remainingAfter,
+            order.currency || null, JSON.stringify(metadata),
+            JSON.stringify({ order_id: input.clientOrderId, reason: input.reason,
+              items_reusable: input.restock ? 'yes' : 'no', items: input.items })],
+        );
+        await manager.query(
+          `UPDATE public.orders SET order_status = 'PARTIAL_REFUND', updated_at = now() WHERE id = $1::uuid`,
+          [order.id],
+        );
+        await manager.query(
+          `UPDATE public.store_orders
+              SET status = 'partial-refund',
+                  meta_data = COALESCE(meta_data, '[]'::jsonb) || $2::jsonb,
+                  updated_at = now()
+            WHERE order_id = $1::uuid`,
+          [order.id, JSON.stringify([
+            { key: '_pos_partial_order_total', value: remainingAfter.toFixed(2) },
+            { key: '_pos_refund_id', value: refundId },
+          ])],
+        );
+        await manager.query(
+          `INSERT INTO public.order_status_history
+             (id, order_id, from_status, to_status, changed_by, reason, created_at)
+           VALUES ($1, $2::uuid, $3, 'PARTIAL_REFUND', $4, $5, now())`,
+          [`HST-${refundId}`, order.id, String(order.order_status || 'COMPLETED'), input.performedBy, input.reason],
+        );
+
+        if (input.restock && refundItems.length) {
+          const columns = await manager.query(
+            `SELECT column_name FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'inventory_items'`,
+          );
+          const names = new Set(columns.map((column: any) => String(column.column_name)));
+          const supported = ['storeId', 'productId', 'quantityOnHand', 'quantityAvailable', 'updatedAt']
+            .every((name) => names.has(name));
+          if (supported) {
+            for (const [index, item] of refundItems.entries()) {
+              if (!item.product_id) continue;
+              const updated = await manager.query(
+                `UPDATE public.inventory_items
+                    SET "quantityOnHand" = "quantityOnHand" + $3,
+                        "quantityAvailable" = "quantityAvailable" + $3,
+                        "updatedAt" = now()
+                  WHERE "storeId" = $1 AND "productId" = $2
+                  RETURNING "quantityAvailable" AS quantity_available`,
+                [input.storeId, String(item.product_id), Number(item.quantity || 0)],
+              );
+              const updatedRows = Array.isArray(updated[0]) ? updated[0] : updated;
+              if (updatedRows[0]) {
+                const available = Number(updatedRows[0].quantity_available || 0);
+                await manager.query(
+                  `INSERT INTO public.inventory_adjustments
+                     (id, "storeId", "productId", "adjustmentType", "quantityChanged",
+                      "newQuantityAvailable", "performedBy", reason, "createdAt")
+                   VALUES ($1, $2, $3, 'REFUND_RESTOCK', $4, $5, $6, $7, now())
+                   ON CONFLICT (id) DO NOTHING`,
+                  [`ADJ-REFUND-${refundId}-${index + 1}`, input.storeId, String(item.product_id),
+                    Number(item.quantity || 0), available, input.performedBy,
+                    `Partial refund ${refundId}: ${input.reason}`],
+                );
+                await this.cacheInventoryStock(input.storeId, String(item.product_id), available);
+              }
+            }
+          }
+        }
+        return { kind: 'created' as const, orderId: order.id,
+          orderNumber: String(order.order_number || ''), refundedAmount: refundTotal, refundId };
+      });
+    } catch (error: unknown) {
+      if (error instanceof QueryFailedError && (error as { driverError?: { code?: string } }).driverError?.code === '22P02') {
+        throw new BadRequestException('x-merchant-id and x-store-id must be UUIDs');
+      }
       throw error;
     }
   }
@@ -1463,6 +1946,14 @@ export class OrderRepository implements OnModuleInit {
     if (this.isRedisConnected && this.redisClient) {
       try {
         await this.redisClient.set(`order:${order.id}`, JSON.stringify(order), 'EX', 86400);
+      } catch {}
+    }
+  }
+
+  private async cacheInventoryStock(storeId: string, productId: string, quantityAvailable: number) {
+    if (this.isRedisConnected && this.redisClient) {
+      try {
+        await this.redisClient.set(`stock:${storeId}:${productId}`, String(quantityAvailable), 'EX', 86400);
       } catch {}
     }
   }

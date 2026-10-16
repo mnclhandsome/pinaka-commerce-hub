@@ -543,6 +543,85 @@ export class PosAuthService {
     }
   }
 
+  /**
+   * Verifies that a refund-authorizing PIN belongs to the employee represented
+   * by the active POS session. This mirrors the WordPress refund-valid-user
+   * contract while retaining PCH merchant/store isolation.
+   */
+  async validateRefundUser(
+    employeePin: unknown,
+    authorization?: string,
+    merchantHeader?: string,
+    storeHeader?: string,
+  ) {
+    const pin = String(employeePin ?? '').trim();
+    if (!/^\d{6}$/.test(pin)) {
+      throw new BadRequestException({
+        success: false,
+        statusCode: 400,
+        code: pin ? 'invalid_pin_format' : 'invalid_pin',
+        message: pin ? 'PIN must be exactly 6 digits.' : 'Invalid PIN or user not found.',
+        data: {},
+      });
+    }
+
+    const scope = await this.authorizeStoreCatalog(authorization, merchantHeader, storeHeader);
+    const candidates = await scope.dataSource.query(
+      `SELECT e.id::text AS id,
+              COALESCE(es.login_pin_hash, e.login_pin_hash) AS "storePinHash",
+              e.login_pin_hash AS "employeePinHash",
+              COALESCE(es.login_pin, e.login_pin) AS "storePin",
+              e.login_pin AS "employeePin"
+         FROM public.employee_stores AS es
+         JOIN public.employees AS e ON e.id = es.employee_id
+        WHERE es.store_id = $1::uuid
+          AND (e.merchant_id = $2::uuid OR es.merchant_id = $2::uuid)
+          AND (e.status IS NULL OR upper(e.status::text) <> 'INACTIVE')
+          AND (es.status IS NULL OR upper(es.status::text) <> 'INACTIVE')
+          AND (
+            es.login_pin_hash IS NOT NULL OR e.login_pin_hash IS NOT NULL
+            OR es.login_pin IS NOT NULL OR e.login_pin IS NOT NULL
+          )`,
+      [scope.store.id, scope.merchant.id],
+    );
+
+    let matchedEmployeeId: string | undefined;
+    for (const candidate of candidates) {
+      const plainPins = [candidate.storePin, candidate.employeePin]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      const hashes = [candidate.storePinHash, candidate.employeePinHash].filter(Boolean);
+      let matched = plainPins.includes(pin);
+      for (const hash of hashes) {
+        if (!matched && await this.pinService.verify(pin, hash)) matched = true;
+      }
+      if (matched) {
+        matchedEmployeeId = String(candidate.id);
+        break;
+      }
+    }
+
+    if (!matchedEmployeeId) {
+      throw new BadRequestException({
+        success: false,
+        statusCode: 400,
+        code: 'invalid_pin',
+        message: 'Invalid PIN or user not found.',
+        data: {},
+      });
+    }
+    if (matchedEmployeeId !== scope.employeeId) {
+      throw new ForbiddenException({
+        success: false,
+        statusCode: 403,
+        code: 'unauthorized_user',
+        message: 'You are not authorized to access this resource.',
+        data: {},
+      });
+    }
+    return { success: true, message: 'User verified successfully' };
+  }
+
   
 
   /**
@@ -743,7 +822,7 @@ export class PosAuthService {
     const storeIds = this.identityKeys(store.id, store.storeCode);
     this.assertTokenMatchesStore(payload, session, merchantIds, storeIds);
 
-    return { dataSource, merchant, store, merchantIds, storeIds };
+    return { dataSource, merchant, store, merchantIds, storeIds, employeeId: session.employee_id };
   }
 
   private assertTokenMatchesStore(
@@ -940,6 +1019,7 @@ interface CatalogScope {
   store: StoreScopeRow;
   merchantIds: string[];
   storeIds: string[];
+  employeeId: string;
 }
 
 interface CatalogProduct {

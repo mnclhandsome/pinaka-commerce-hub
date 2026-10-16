@@ -32,6 +32,8 @@ export async function ensureStorePosPaymentsSchema(db: DataSource): Promise<void
         amount numeric(12, 2) NOT NULL CHECK (amount >= 0),
         order_total numeric(12, 2) NOT NULL CHECK (order_total >= 0),
         remaining numeric(12, 2) NOT NULL DEFAULT 0 CHECK (remaining >= 0),
+        refund_amount numeric(12, 2) NOT NULL DEFAULT 0 CHECK (refund_amount >= 0),
+        balance_amount numeric(12, 2) NOT NULL DEFAULT 0 CHECK (balance_amount >= 0),
         currency varchar(3),
         status varchar(50) NOT NULL DEFAULT 'completed',
         entry_type varchar(20) NOT NULL DEFAULT 'payment'
@@ -48,6 +50,18 @@ export async function ensureStorePosPaymentsSchema(db: DataSource): Promise<void
         updated_at timestamptz NOT NULL DEFAULT now(),
         deleted_at timestamptz
       )
+    `);
+    await manager.query(`
+      ALTER TABLE public.store_pos_payments
+        ADD COLUMN IF NOT EXISTS refund_amount numeric(12, 2) NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS balance_amount numeric(12, 2) NOT NULL DEFAULT 0
+    `);
+    await manager.query(`
+      UPDATE public.store_pos_payments
+         SET refund_amount = amount,
+             balance_amount = remaining
+       WHERE entry_type = 'refund'
+         AND refund_amount = 0
     `);
     await manager.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS store_pos_payments_sync_uidx

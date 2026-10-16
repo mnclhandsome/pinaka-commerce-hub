@@ -36,6 +36,7 @@ export class OrderListPresenter {
       storeOrder: StoreOrderEntity | null;
       items: OrderItemEntity[];
       products: Map<string, unknown>;
+      refunds: Array<{ amount: unknown; metadata: Record<string, unknown> | null }>;
     }>,
   ) {
     return {
@@ -51,6 +52,7 @@ export class OrderListPresenter {
     storeOrder: StoreOrderEntity | null;
     items: OrderItemEntity[];
     products: Map<string, unknown>;
+    refunds: Array<{ amount: unknown; metadata: Record<string, unknown> | null }>;
   }) {
     const { order, storeOrder } = row;
     const request = (order.requestPayload || {}) as Record<string, unknown>;
@@ -62,7 +64,22 @@ export class OrderListPresenter {
     const orderNumber = Number(String(order.orderNumber || '').replace(/\D/g, ''));
     const total = this.money(storeOrder?.total ?? order.totalAmount);
     const totalNumber = Number(total);
-    const lineItems = this.lineItems(storeOrder?.lineItems, row.items, order.storeId, row.products);
+    const refundTotal = row.refunds.reduce((sum, refund) => sum + Number(refund.amount || 0), 0);
+    const refundedItemIds = new Set(row.refunds.flatMap((refund) => {
+      const lines = refund.metadata?.line_items;
+      return Array.isArray(lines)
+        ? lines.map((line: any) => String(line?.order_item_id ?? '')).filter(Boolean)
+        : [];
+    }));
+    const fullyRefunded = status.toLowerCase() === 'refunded';
+    const lineItems = this.lineItems(
+      storeOrder?.lineItems,
+      row.items,
+      order.storeId,
+      row.products,
+      refundedItemIds,
+      fullyRefunded,
+    );
     return {
       id: this.clientOrderId(order, storeOrder),
       woo_order_id: Number.isSafeInteger(orderNumber) && orderNumber > 0 ? orderNumber : null,
@@ -86,8 +103,8 @@ export class OrderListPresenter {
       fee_lines: Array.isArray(storeOrder?.feeLines) ? storeOrder.feeLines : [],
       tax_lines: Array.isArray(storeOrder?.taxLines) ? storeOrder.taxLines : [],
       refund_order_total: totalNumber,
-      refund_total: 0,
-      net_payment: totalNumber,
+      refund_total: this.round(refundTotal),
+      net_payment: this.round(Math.max(0, totalNumber - refundTotal)),
     };
   }
 
@@ -96,6 +113,8 @@ export class OrderListPresenter {
     items: OrderItemEntity[],
     storeId: string,
     products: Map<string, unknown>,
+    refundedItemIds: Set<string>,
+    fullyRefunded: boolean,
   ) {
     const lines = Array.isArray(stored) && stored.length
       ? stored
@@ -108,7 +127,14 @@ export class OrderListPresenter {
           total: item.totalPrice,
           meta_data: item.modifiers || [],
         }));
-    return lines.map((line, index) => this.lineItem(line, items[index], storeId, products));
+    return lines.map((line, index) => this.lineItem(
+      line,
+      items[index],
+      storeId,
+      products,
+      refundedItemIds,
+      fullyRefunded,
+    ));
   }
 
   private lineItem(
@@ -116,6 +142,8 @@ export class OrderListPresenter {
     fallback: OrderItemEntity | undefined,
     storeId: string,
     products: Map<string, unknown>,
+    refundedItemIds: Set<string>,
+    fullyRefunded: boolean,
   ) {
     const productId = Number(line?.product_id ?? line?.productId ?? fallback?.productId);
     const productKey = String(line?.product_id ?? line?.productId ?? fallback?.productId ?? '');
@@ -134,7 +162,9 @@ export class OrderListPresenter {
       meta_data: Array.isArray(line?.meta_data)
         ? line.meta_data
         : (Array.isArray(fallback?.modifiers) ? fallback.modifiers : []),
-      is_refund_item: Boolean(line?.is_refund_item),
+      is_refund_item: fullyRefunded
+        ? false
+        : refundedItemIds.has(String(line?.id ?? fallback?.id ?? '')),
       product_data: line?.product_data ?? products.get(`${storeId}:${productKey}`) ?? null,
     };
   }
@@ -162,6 +192,8 @@ export class OrderListPresenter {
         return 'cancelled';
       case 'COMPLETED':
         return 'completed';
+      case 'PARTIAL_REFUND':
+        return 'partial-refund';
       case 'REFUNDED':
         return 'refunded';
       default:
@@ -210,6 +242,10 @@ export class OrderListPresenter {
 
   private money(value: unknown): string {
     return Number(value || 0).toFixed(2);
+  }
+
+  private round(value: number): number {
+    return Math.round((value + Number.EPSILON) * 100) / 100;
   }
 
   private taxText(value: unknown): string {
