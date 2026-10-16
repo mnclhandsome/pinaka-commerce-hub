@@ -321,16 +321,12 @@ export class AppController {
     const shifts = await this.posRepository.getShiftsByEmployee(id, storeId?.trim() || undefined);
     return { success: true, employeeId: id, count: shifts.length, shifts };
   }
-  @Get('merchants/:merchant_id/stores/:store_id/shifts')
-  async getShiftsByMerchantStore(
-    @Param('merchant_id') merchant_id: string,
-    @Param('store_id') store_id: string,
-  ) {
-    const merchantId = merchant_id.trim();
+  @Get('stores/:store_id/shifts')
+  async getShiftsByStore(@Param('store_id') store_id: string) {
     const storeId = store_id.trim();
-    if (!merchantId || !storeId) throw new BadRequestException('merchant_id and store_id are required');
-    const shifts = await this.posRepository.getShiftsByMerchantStore(merchantId, storeId);
-    return { success: true, merchant_id: merchantId, store_id: storeId, count: shifts.length, shifts };
+    if (!storeId) throw new BadRequestException('store_id is required');
+    const shifts = await this.posRepository.getShiftsByStore(storeId);
+    return { success: true, store_id: storeId, count: shifts.length, shifts };
   }
 
   @Get('stores/:store_id/shifts/:shift_id')
