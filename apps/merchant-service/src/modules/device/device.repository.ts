@@ -28,12 +28,12 @@ export class DeviceRepository {
         // Serialize code allocation so concurrent creates cannot choose the same code.
         await manager.query('SELECT pg_advisory_xact_lock(724621, 56)');
         const rows: Array<{ maxCode: string | null }> = await manager.query(`
-          SELECT MAX(substring(device_code FROM '^DVC-([0-9]+)$')::bigint)::text AS "maxCode"
+          SELECT MAX(substring(device_code FROM '^DVC[-_]([0-9]+)$')::bigint)::text AS "maxCode"
           FROM public.devices
-          WHERE device_code ~ '^DVC-[0-9]+$'
+          WHERE device_code ~ '^DVC[-_][0-9]+$'
         `);
         const nextCode = Number(rows[0]?.maxCode ?? 0) + 1;
-        const deviceCode = `DVC-${String(nextCode).padStart(5, '0')}`;
+        const deviceCode = `DVC_${String(nextCode).padStart(5, '0')}`;
         let deviceActiveCode = '';
         for (let attempt = 0; attempt < 10; attempt += 1) {
           const candidate = `PK-${randomInt(100000, 1000000)}`;

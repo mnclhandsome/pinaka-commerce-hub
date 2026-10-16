@@ -8,7 +8,7 @@ async function main() {
   const merchantRepository = new MerchantRepository();
   const deviceRecord: Record<string, any> = {
     id: 'device-uuid',
-    deviceCode: 'DVC-00001',
+    deviceCode: 'DVC_00001',
     deviceName: 'POS terminal',
     merchantId: 'merchant-uuid',
     deviceActiveCode: 'PK-123456',
