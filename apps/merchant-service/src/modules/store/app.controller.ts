@@ -927,17 +927,29 @@ export class AppController {
   }
 
   private async pingWordPress(wordpressUrl: string, wordpressJwt: string): Promise<{ ok: boolean; message: string }> {
+    const headers = { Accept: 'application/json', Authorization: `Bearer ${wordpressJwt}` };
+    const baseUrl = wordpressUrl.replace(/\/+$/, '');
     try {
-      const response = await fetch(`${wordpressUrl}/wp-json/wp/v2/users/me`, {
-        headers: { Accept: 'application/json', Authorization: `Bearer ${wordpressJwt}` },
+      const response = await fetch(`${baseUrl}/wp-json/wp/v2/users/me`, {
+        headers,
+        signal: AbortSignal.timeout(10000),
       });
-      if (!response.ok) {
-        return { ok: false, message: `WordPress returned HTTP ${response.status}. Check the site URL and JWT token.` };
-      }
-      return { ok: true, message: 'WordPress JWT verified successfully.' };
+      if (response.ok) return { ok: true, message: 'WordPress JWT verified successfully.' };
+      // WooCommerce bearer tokens may be valid for the REST API while lacking
+      // permission to use WordPress's users/me endpoint. Validate them against
+      // the same WooCommerce Coupons API used by the coupon integration.
+      const wooResponse = await fetch(`${baseUrl}/wp-json/wc/v3/coupons?per_page=1`, {
+        headers,
+        signal: AbortSignal.timeout(10000),
+      });
+      if (wooResponse.ok) return { ok: true, message: 'WooCommerce bearer token verified successfully.' };
+      return {
+        ok: false,
+        message: `WordPress JWT check returned HTTP ${response.status}; WooCommerce Coupons API check returned HTTP ${wooResponse.status}. Check the site URL and token.`,
+      };
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      return { ok: false, message: `Could not reach WordPress: ${message}` };
+      return { ok: false, message: `Could not verify the WordPress or WooCommerce token: ${message}` };
     }
   }
 
