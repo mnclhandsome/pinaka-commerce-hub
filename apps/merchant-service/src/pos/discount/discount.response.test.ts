@@ -81,10 +81,47 @@ test('get by ID reads only the requested type from the existing store_discounts 
   await assert.rejects(service.getById('store-1', 'coupon', '41', 'OWNER'), (error: any) => error.getStatus() === 400);
 });
 
-test('discount rules projection remains the WordPress top-level array', async () => {
-  const sourceResponse = [{ ruleId: 'AUTO_41', ruleType: 'auto', productIds: [8], bundlePrice: 10, requiredQty: 0, active: true }];
-  respond(sourceResponse);
-  assert.deepEqual(await serviceWithConnection().listRules('store-1', 'OWNER'), sourceResponse);
+test('discount rules are projected from store_discounts in the WooCommerce rule shape', async () => {
+  const service = serviceWithConnection();
+  (service as any).merchants = { getStoreById: async () => ({ id: 'store-1' }) };
+  (service as any).readDiscountPayload = async () => ({
+    auto: [{
+      id: 17533, product_id: 17274, coupon_amount: '15', discount_type: 'fixed_cart',
+      start_date: '2026-10-18', expiry_date: '2026-10-21', minimum_amount: '5', maximum_amount: '50',
+    }],
+    mix_match: [{
+      id: 17534, product_id: 17274, discount_product_ids: [17284, 17270],
+      coupon_amount: '2', discount_type: 'fixed_item',
+    }],
+    multipack: [{
+      id: 0, product_id: 4556, qty: '3', discount: '10%',
+      start_date: '2026-10-01', expiry_date: '2026-12-31',
+    }],
+  });
+  assert.deepEqual(await service.listRules('store-1', 'OWNER'), [
+    {
+      ruleId: 'AUTO_17533', ruleType: 'auto', productIds: [17274], bundlePrice: 15, requiredQty: 0,
+      bundlePriceType: 'price', startDate: '2026-10-18', endDate: '2026-10-21',
+      minimumAmount: '5', maximumAmount: '50', active: true,
+    },
+    {
+      ruleId: 'MM_17534', ruleType: 'mixmatch', productIds: [17284, 17270], requiredProductIds: 17274,
+      requiredQty: 0, bundlePrice: 2, bundlePriceType: 'price', active: true,
+    },
+    {
+      ruleId: 'MP_0', ruleType: 'multipack', productIds: [4556], requiredQty: 3, bundlePrice: 10,
+      bundlePriceType: 'percentage', startDate: '2026-10-01', endDate: '2026-12-31', active: true,
+    },
+  ]);
+  assert.deepEqual(
+    (await service.listRules('store-1', 'OWNER', '17284')).map((rule: { ruleId: string }) => rule.ruleId),
+    ['MM_17534'],
+  );
+  assert.equal((await service.listRules('store-1', 'Cashier', undefined, 'store-1')).length, 3);
+  await assert.rejects(
+    () => service.listRules('store-1', 'Cashier', undefined, 'store-2'),
+    (error: { getStatus?: () => number; message?: string }) => error.getStatus?.() === 403 && /signed-in store/.test(error.message || ''),
+  );
 });
 
 test('order apply and remove return their own WordPress response bodies unchanged', async () => {
