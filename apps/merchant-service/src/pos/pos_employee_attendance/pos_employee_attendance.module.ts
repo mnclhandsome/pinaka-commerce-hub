@@ -5,10 +5,11 @@ import { PosEmployeeAttendanceController } from './pos_employee_attendance.contr
 import { PosEmployeeAttendanceGuard } from './pos_employee_attendance.guard';
 import { PosEmployeeAttendanceRepository } from './pos_employee_attendance.repository';
 import { PosEmployeeAttendanceService } from './pos_employee_attendance.service';
+import { StoreEmployeeAttendanceController } from './store_employee_attendance.controller';
 
 @Module({
   imports: [MerchantModule],
-  controllers: [PosEmployeeAttendanceController],
+  controllers: [PosEmployeeAttendanceController, StoreEmployeeAttendanceController],
   providers: [
     PosEmployeeAttendanceRepository,
     PosEmployeeAttendanceService,
