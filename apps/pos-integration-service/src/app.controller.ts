@@ -233,6 +233,16 @@ export class AppController {
     closing_cash_actual?: number;
     closedByEmployeeId?: string;
     closed_by_employee_id?: string;
+    closed_by_device_id?: string;
+    total_orders?: number;
+    total_order_sale_amount?: number;
+    total_cashback?: number;
+    total_payouts?: number;
+    total_ebt_sales?: number;
+    total_pay_later?: number;
+    total_refunds?: number;
+    total_cancelled_orders?: number;
+    total_void_items?: number;
   }) {
     const body = normalizeShiftRequest(request);
     if (!body.shiftId || body.closingCashActual === undefined) {
@@ -242,7 +252,39 @@ export class AppController {
     if (closedByEmployeeId && !UUID_PATTERN.test(closedByEmployeeId)) {
       throw new BadRequestException('closedByEmployeeId must be a valid UUID');
     }
-    const result = await this.posRepository.closeShift(body.shiftId, Number(body.closingCashActual), closedByEmployeeId);
+    for (const [field, count] of [
+      ['total_orders', body.total_orders],
+      ['total_cancelled_orders', body.total_cancelled_orders],
+      ['total_void_items', body.total_void_items],
+    ] as const) {
+      if (count !== undefined && (!Number.isInteger(count) || count < 0)) {
+        throw new BadRequestException(`${field} must be a non-negative integer`);
+      }
+    }
+    for (const [field, amount] of [
+      ['total_order_sale_amount', body.total_order_sale_amount],
+      ['total_cashback', body.total_cashback],
+      ['total_payouts', body.total_payouts],
+      ['total_ebt_sales', body.total_ebt_sales],
+      ['total_pay_later', body.total_pay_later],
+      ['total_refunds', body.total_refunds],
+    ] as const) {
+      if (amount !== undefined && (!Number.isFinite(amount) || amount < 0)) {
+        throw new BadRequestException(`${field} must be a non-negative number`);
+      }
+    }
+    const result = await this.posRepository.closeShift(body.shiftId, Number(body.closingCashActual), closedByEmployeeId, {
+      closed_by_device_id: body.closed_by_device_id?.trim() || undefined,
+      total_orders: body.total_orders,
+      total_order_sale_amount: body.total_order_sale_amount,
+      total_cashback: body.total_cashback,
+      total_payouts: body.total_payouts,
+      total_ebt_sales: body.total_ebt_sales,
+      total_pay_later: body.total_pay_later,
+      total_refunds: body.total_refunds,
+      total_cancelled_orders: body.total_cancelled_orders,
+      total_void_items: body.total_void_items,
+    });
     if (!result.success) {
       throw new NotFoundException(result.message);
     }
@@ -278,6 +320,17 @@ export class AppController {
     const { storeId } = normalizeShiftRequest(query);
     const shifts = await this.posRepository.getShiftsByEmployee(id, storeId?.trim() || undefined);
     return { success: true, employeeId: id, count: shifts.length, shifts };
+  }
+  @Get('merchants/:merchant_id/stores/:store_id/shifts')
+  async getShiftsByMerchantStore(
+    @Param('merchant_id') merchant_id: string,
+    @Param('store_id') store_id: string,
+  ) {
+    const merchantId = merchant_id.trim();
+    const storeId = store_id.trim();
+    if (!merchantId || !storeId) throw new BadRequestException('merchant_id and store_id are required');
+    const shifts = await this.posRepository.getShiftsByMerchantStore(merchantId, storeId);
+    return { success: true, merchant_id: merchantId, store_id: storeId, count: shifts.length, shifts };
   }
 
   @Get('stores/:store_id/shifts/:shift_id')
