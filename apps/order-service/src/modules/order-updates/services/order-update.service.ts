@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { moneyAmount } from '../../../calculations/order-update.calculations';
+import { moneyAmount, withCouponBase } from '../../../calculations/order-update.calculations';
 import { OrderRepository } from '../../../order.repository';
 import type { AddOrderItemsDto, ApplyCouponDto, ApplyDiscountDto, CancelOrderDto, UpdateOrderDto } from '../dto/order-update.dto';
 import { cancelFromDto, couponFromDto, discountFromDto, itemsFromDto } from '../order-update.normalize';
@@ -34,7 +34,15 @@ export class OrderUpdateService {
     }
     let graph = await this.load(orderId);
     if (hasCoupons) {
-      const coupons = (dto.coupon_lines || []).map((line) => this.couponCatalog.resolve(line.code));
+      const lines = this.lines.fromGraph(graph).map((line) => withCouponBase(line));
+      const requested = dto.coupon_lines || [];
+      const coupons = await Promise.all(requested.map((line) => this.couponCatalog.resolve({
+        storeId: graph.order.storeId,
+        code: line.code,
+        lines,
+        email: this.billingEmail(graph),
+        couponCount: requested.length,
+      })));
       graph = await this.persist(graph, this.coupons.sync(graph, coupons));
     }
     if (hasStatus) {
@@ -91,6 +99,12 @@ export class OrderUpdateService {
     const draft = this.cancellation.cancel(graph, cancelFromDto(dto));
     const saved = await this.persist(graph, draft);
     return this.presenter.present(saved);
+  }
+
+  private billingEmail(graph: OrderGraph): string | undefined {
+    const payload = graph.order.requestPayload as { billing?: { email?: string } } | null;
+    const email = payload?.billing?.email;
+    return typeof email === 'string' && email.trim() ? email.trim() : undefined;
   }
 
   private async load(orderId: string): Promise<OrderGraph> {

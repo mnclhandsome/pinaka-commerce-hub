@@ -4,6 +4,7 @@ import { StoreDiscountEntity } from '../../entities/store-discount.entity';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, InternalServerErrorException, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { createDecipheriv, createHash } from 'node:crypto';
 import { MerchantRepository } from '../../modules/merchant/merchant.repository';
+import { mapDiscountRules } from './discount-rule.model';
 import { WordPressResponseException } from './wordpress-response.exception';
 
 @Injectable()
@@ -141,9 +142,12 @@ export class DiscountService implements OnModuleInit {
     return record;
   }
 
-  async listRules(storeId: string, role?: string) {
-    const connection = await this.requireWordPressConnection(storeId, role);
-    return this.wordpressRequest(connection, 'assets/discount-rules', 'GET');
+  async listRules(storeId: string, role?: string, productId?: string, sessionStoreId?: string) {
+    this.assertDiscountRulesReader(role, storeId, sessionStoreId);
+    const store = await this.merchants.getStoreById(storeId);
+    if (!store) throw new NotFoundException(`Store '${storeId}' not found`);
+    const payload = await this.readDiscountPayload(store.id);
+    return mapDiscountRules(payload, productId);
   }
 
   async applyToOrder(storeId: string, orderId: string, body: Record<string, unknown>, role?: string) {
@@ -308,7 +312,7 @@ export class DiscountService implements OnModuleInit {
         'product_id', 'pinaka_discount_auto_apply'],
       mix_match: ['code', 'minimum_amount', 'maximum_amount', 'min_qty', 'max_qty', 'usage_limit',
         'product_id', 'main_product_id', 'discount_product_ids', 'required_product_ids', 'required_product_id', 'required_products'],
-      multipack: ['usage_limit', 'product_id', 'main_product_id', 'qty', 'quantity', 'required_quantity'],
+      multipack: ['code', 'usage_limit', 'product_id', 'main_product_id', 'qty', 'quantity', 'required_quantity'],
     };
     const allowed = [...commonFields, ...typeFields[type]];
     const output: Record<string, any> = { type };
@@ -754,6 +758,19 @@ export class DiscountService implements OnModuleInit {
     if (process.env.SKIP_AUTH !== 'true' && !['OWNER', 'ADMIN', 'ADMINISTRATOR', 'MERCHANT_ADMIN'].includes(normalizedRole)) {
       throw new ForbiddenException('Only owners or store administrators can manage website connections');
     }
+  }
+
+  private assertDiscountRulesReader(role: string | undefined, storeId: string, sessionStoreId?: string) {
+    if (process.env.SKIP_AUTH === 'true') return;
+    const normalizedRole = String(role ?? '').trim().toUpperCase();
+    if (['OWNER', 'ADMIN', 'ADMINISTRATOR', 'MERCHANT_ADMIN'].includes(normalizedRole)) {
+      if (['ADMIN', 'ADMINISTRATOR', 'MERCHANT_ADMIN'].includes(normalizedRole) && sessionStoreId && sessionStoreId !== storeId) {
+        throw new ForbiddenException('Store administrators can access discounts only for their assigned store');
+      }
+      return;
+    }
+    if (sessionStoreId && sessionStoreId === storeId) return;
+    throw new ForbiddenException('Discount rules can be read only for the signed-in store');
   }
 
 }

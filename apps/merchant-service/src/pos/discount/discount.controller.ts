@@ -58,9 +58,12 @@ export class DiscountController {
 
   @Get(':storeId/discount-rules')
   @HttpCode(200)
-  listRules(@Param('storeId') storeId: string, @Req() request: { user?: { role?: string; storeId?: string } }) {
-    this.assertStoreAccess(storeId, request.user);
-    return this.discounts.listRules(storeId, request.user?.role);
+  listRules(
+    @Param('storeId') storeId: string,
+    @Query('product_id') productId: string | undefined,
+    @Req() request: { user?: { role?: string; storeId?: string } },
+  ) {
+    return this.discounts.listRules(storeId, request.user?.role, productId, request.user?.storeId);
   }
 
   @Post(':storeId/discounts/apply/:orderId')

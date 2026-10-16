@@ -6,6 +6,8 @@ import {
   type PosLineItem,
 } from './store-order.calculations';
 
+export { isMerchandiseLine };
+
 export type CouponDiscountType = 'percent' | 'fixed_cart' | 'fixed_product';
 
 export type OrderLine = PosLineItem & {
@@ -24,6 +26,7 @@ export interface CouponSpec {
   discountType: CouponDiscountType;
   amount: number;
   productIds?: string[];
+  excludedProductIds?: string[];
 }
 
 export interface AddedLineInput {
@@ -129,10 +132,9 @@ export function applyCoupon(
   const include = (line: OrderLine, index: number) => {
     if (onlyIndexes && !onlyIndexes.has(index)) return false;
     if (!isMerchandiseLine(line)) return false;
-    if (coupon.discountType === 'fixed_product' && coupon.productIds?.length) {
-      const productId = String(line.product_id ?? line.productId ?? '');
-      return coupon.productIds.some((id) => id === productId);
-    }
+    const productId = String(line.product_id ?? line.productId ?? '');
+    if (coupon.excludedProductIds?.some((id) => id === productId)) return false;
+    if (coupon.productIds?.length) return coupon.productIds.some((id) => id === productId);
     return true;
   };
 
@@ -174,11 +176,13 @@ export function couponSpecFromLine(line: unknown): CouponSpec | null {
     return null;
   }
   const productIds = read('product_ids');
+  const excludedProductIds = read('excluded_product_ids');
   return {
     code: String(record.code || ''),
     discountType,
     amount: Number(read('amount') || 0),
     productIds: Array.isArray(productIds) ? productIds.map((id) => String(id)) : [],
+    excludedProductIds: Array.isArray(excludedProductIds) ? excludedProductIds.map((id) => String(id)) : [],
   };
 }
 
@@ -192,6 +196,7 @@ export function buildCouponLine(
     { key: 'discount_type', value: coupon.discountType },
     { key: 'amount', value: String(coupon.amount) },
     { key: 'product_ids', value: coupon.productIds || [] },
+    { key: 'excluded_product_ids', value: coupon.excludedProductIds || [] },
   ];
   if (reason) metaData.push({ key: 'reason', value: reason });
   return {
