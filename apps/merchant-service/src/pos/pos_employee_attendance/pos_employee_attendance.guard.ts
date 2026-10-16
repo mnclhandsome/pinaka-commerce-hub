@@ -202,11 +202,34 @@ export class PosEmployeeAttendanceGuard implements CanActivate {
     merchantId: string,
     storeId: string,
   ): Promise<boolean> {
-    // Replace this with a database-backed authorization check.
-    // The session itself is validated, but that does not prove access
-    // to the requested merchant/store.
-    //
-    // Safe default: deny until the real relationship is implemented.
-    return false;
+    const userId = String(adminSession?.userId || payload.sub || '').trim();
+    const sessionEmail = String(adminSession?.email || payload.email || '').trim();
+    const sessionRole = String(adminSession?.role || payload.role || '').trim().toUpperCase();
+    if ((!userId && !sessionEmail) || !merchantId || !storeId) return false;
+
+    try {
+      const matches = await this.merchants.requireDataSource().query(
+        `SELECT 1
+         FROM public.merchants AS m
+         JOIN public.stores AS s
+           ON s.merchant_id = m.id AND s.id::text = $3
+         LEFT JOIN public.users AS u
+           ON u.id::text = $1 OR lower(u.email) = lower($4)
+         WHERE (m.id::text = $2 OR m.merchant_code = $2 OR m.merchant_id = $2)
+           AND u.status = 'ACTIVE'
+           AND (
+             (upper(u.role) IN ('OWNER', 'MANAGER') AND
+               u."merchantId" IN (m.id::text, m.merchant_code, m.merchant_id))
+             OR (m.created_by::text = u.id::text AND upper(u.role) IN ('OWNER', 'MANAGER'))
+             OR (upper(u.role) = 'OWNER' AND lower(u.email) = lower(m.email))
+             OR (upper($5) = 'OWNER' AND lower($4) = lower(m.email))
+           )
+         LIMIT 1`,
+        [userId, merchantId, storeId, sessionEmail, sessionRole],
+      );
+      return matches.length > 0;
+    } catch {
+      return false;
+    }
   }
 }
