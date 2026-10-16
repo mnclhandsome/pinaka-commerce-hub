@@ -2,7 +2,12 @@ import { BadRequestException, Body, Controller, Headers, HttpCode, HttpStatus, I
 import { extractBearerToken, verifyAccessToken } from '@pch/auth';
 import { FullOrderRefundService, type FullOrderRefundRequest } from './full-order-refund.service';
 
-@Controller('connector/api/v1/orders')
+@Controller([
+  'api/v1/orders',
+  'connector/api/v1/orders',
+  'pinaka-pos/v1/orders',
+  'wp-json/pinaka-pos/v1/orders',
+])
 export class FullOrderRefundController {
   constructor(@Inject(FullOrderRefundService) private readonly refunds: FullOrderRefundService) {}
 

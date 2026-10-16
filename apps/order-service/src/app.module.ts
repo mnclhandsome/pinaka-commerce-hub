@@ -1,3 +1,4 @@
+import { RefundValidUserController } from './refund-valid-user.controller';
 import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { OrderUpdatesModule } from './modules/order-updates/order-updates.module';
@@ -17,7 +18,7 @@ import { PartialOrderRefundService } from './partial-order-refund.service';
 @Module({
   imports: [OrderPersistenceModule, OrderUpdatesModule],
   // Register fixed order paths before AppController's dynamic GET /:id route.
-  controllers: [CompletedOrdersController, RefundAmountController, FullOrderRefundController, PartialOrderRefundController, AppController, StorePosPaymentsController],
+  controllers: [CompletedOrdersController, RefundValidUserController, RefundAmountController, FullOrderRefundController, PartialOrderRefundController, AppController, StorePosPaymentsController],
   providers: [OrderResponsePresenter, OrderListPresenter, CompletedOrderPresenter, RefundAmountService, FullOrderRefundService, PartialOrderRefundService],
 })
 export class AppModule {}

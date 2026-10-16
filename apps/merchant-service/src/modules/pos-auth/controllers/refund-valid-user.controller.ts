@@ -3,7 +3,12 @@ import { Public } from '@pinaka-delivery-hub/auth';
 import { PosAuthService } from '../services/pos-auth.service';
 
 @Public()
-@Controller('connector/api/v1/orders')
+@Controller([
+  'api/v1/orders',
+  'connector/api/v1/orders',
+  'pinaka-pos/v1/orders',
+  'wp-json/pinaka-pos/v1/orders',
+])
 export class RefundValidUserController {
   constructor(@Inject(PosAuthService) private readonly auth: PosAuthService) {}
 

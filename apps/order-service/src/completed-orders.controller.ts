@@ -3,7 +3,12 @@ import { extractBearerToken, verifyAccessToken } from '@pch/auth';
 import { OrderRepository } from './order.repository';
 import { CompletedOrderPresenter } from './responses/completed-order.presenter';
 
-@Controller('connector/api/v1/orders')
+@Controller([
+  'api/v1/orders',
+  'connector/api/v1/orders',
+  'pinaka-pos/v1/orders',
+  'wp-json/pinaka-pos/v1/orders',
+])
 export class CompletedOrdersController {
   constructor(
     @Inject(OrderRepository) private readonly orders: OrderRepository,
