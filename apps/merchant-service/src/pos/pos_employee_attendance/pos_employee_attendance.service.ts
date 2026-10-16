@@ -107,6 +107,13 @@ export class PosEmployeeAttendanceService implements OnModuleInit {
     };
   }
 
+  async getById(identity: PosAttendanceIdentity, attendanceId: string) {
+    return {
+      success: true,
+      attendance: await this.attendance.findById(identity, attendanceId),
+    };
+  }
+
   private async authenticate(dto: PosEmployeeAttendanceClockDto) {
     const employeeCode = dto.resolvedEmployeeCode;
     const merchantId = dto.resolvedMerchantId;
