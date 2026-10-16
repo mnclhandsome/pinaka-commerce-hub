@@ -6,7 +6,9 @@ import {
   HttpCode,
   HttpStatus,
   Inject,
+  Param,
   Post,
+  ParseUUIDPipe,
   Query,
   Req,
   UseGuards,
@@ -67,5 +69,14 @@ export class PosEmployeeAttendanceController {
   @UseGuards(PosEmployeeAttendanceGuard)
   current(@Req() request: PosEmployeeAttendanceRequest) {
     return this.attendance.current(request.posEmployee!);
+  }
+
+  @Get(':attendanceId')
+  @UseGuards(PosEmployeeAttendanceGuard)
+  getById(
+    @Req() request: PosEmployeeAttendanceRequest,
+    @Param('attendanceId', new ParseUUIDPipe()) attendanceId: string,
+  ) {
+    return this.attendance.getById(request.posEmployee!, attendanceId);
   }
 }

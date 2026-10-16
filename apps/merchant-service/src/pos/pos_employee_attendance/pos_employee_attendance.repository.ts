@@ -294,6 +294,37 @@ export class PosEmployeeAttendanceRepository {
     return this.listForStore(identity, filters);
   }
 
+  async findById(identity: PosAttendanceIdentity, attendanceId: string) {
+    const rows = await this.db.query(
+      `SELECT id::text AS id,
+              merchant_id AS "merchantId",
+              store_id AS "storeId",
+              employee_id AS "employeeId",
+              employee_code AS "employeeCode",
+              employee_name AS "employeeName",
+              clock_in AS "clockIn",
+              clock_out AS "clockOut",
+              created_at AS "createdAt",
+              updated_at AS "updatedAt",
+              status
+       FROM public.pos_employee_attendance
+       WHERE id = $1::uuid
+         AND merchant_id = $2::uuid
+         AND store_id = $3::uuid
+       LIMIT 1`,
+      [attendanceId, identity.merchantId, identity.storeId],
+    );
+
+    if (!rows.length) {
+      throw new NotFoundException({
+        success: false,
+        message: 'Attendance record not found for this store',
+      });
+    }
+
+    return rows[0];
+  }
+
   async listForStore(
     identity: Pick<PosAttendanceIdentity, 'merchantId' | 'storeId'>,
     filters: PosAttendanceListFilters,
