@@ -1773,7 +1773,7 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
   private async resolveMerchantCode(identifier: string): Promise<string> {
     this.id(identifier, 'merchantId');
     const rows = await this.db.query(
-      'SELECT "merchantId" AS id FROM public.merchants WHERE "merchantId"=$1 OR "merchantCode"=$1 OR id::text=$1 LIMIT 1',
+      'SELECT merchant_id AS id FROM public.merchants WHERE merchant_id=$1 OR merchant_code=$1 OR id::text=$1 LIMIT 1',
       [identifier],
     );
     if (!rows.length) throw new NotFoundException('Merchant not found');
@@ -1789,13 +1789,13 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
     let rows: Array<{ id: string }> = [];
     if (config.name === 'EmployeeStores') {
       rows = await this.db.query(
-        `SELECT m."merchantId" AS id FROM public.employees e
+        `SELECT m.merchant_id AS id FROM public.employees e
          JOIN public.merchants m ON m.id=e.merchant_id WHERE e.id=$1::uuid LIMIT 1`,
         [parent],
       );
     } else if (config.name === 'EmployeeStoreRoles') {
       rows = await this.db.query(
-        `SELECT m."merchantId" AS id FROM public.employee_stores es
+        `SELECT m.merchant_id AS id FROM public.employee_stores es
          JOIN public.merchants m ON m.id=es.merchant_id WHERE es.id=$1::uuid LIMIT 1`,
         [parent],
       );
@@ -1806,7 +1806,7 @@ export class RelationshipsRepository implements OnModuleInit, OnModuleDestroy {
 
   private async resolveMerchantUuid(identifier: string): Promise<string> {
     const rows = await this.db.query(
-      'SELECT m.id FROM public.merchants m WHERE m."merchantId"=$1 OR m."merchantCode"=$1 OR m.id::text=$1 ORDER BY m."createdAt" ASC NULLS LAST, m.id LIMIT 1',
+      'SELECT m.id FROM public.merchants m WHERE m.merchant_id=$1 OR m.merchant_code=$1 OR m.id::text=$1 ORDER BY m.created_at ASC NULLS LAST, m.id LIMIT 1',
       [identifier],
     );
     if (!rows.length) throw new NotFoundException('Merchant not found');

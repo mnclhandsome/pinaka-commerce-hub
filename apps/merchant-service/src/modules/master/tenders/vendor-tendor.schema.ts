@@ -49,7 +49,7 @@ await db.query(`
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       "vendorName" VARCHAR(150) NOT NULL,
       "vendorType" VARCHAR(20) NOT NULL,
-      "vendorCode" VARCHAR(50),
+      vendor_code VARCHAR(50),
       "contactPerson" VARCHAR(150),
       phone VARCHAR(30),
       email VARCHAR(150),
@@ -73,13 +73,13 @@ await db.query(`
   await db.query(`ALTER TABLE public.vendors ADD COLUMN IF NOT EXISTS "country" VARCHAR(100)`);
   await db.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS vendors_vendor_code_active_uidx
-    ON public.vendors ("vendorCode")
-    WHERE "deletedAt" IS NULL AND "vendorCode" IS NOT NULL AND "vendorCode" <> ''
+    ON public.vendors (vendor_code)
+    WHERE "deletedAt" IS NULL AND vendor_code IS NOT NULL AND vendor_code <> ''
   `);
   await db.query(`
     CREATE TABLE IF NOT EXISTS public.tendors (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      "tendorCode" VARCHAR(50) NOT NULL,
+      tendor_code VARCHAR(50) NOT NULL,
       "tendorName" VARCHAR(150) NOT NULL,
       status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
       "createdAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -88,13 +88,13 @@ await db.query(`
       CONSTRAINT tendors_status_valid CHECK (status IN ('ACTIVE', 'INACTIVE'))
     )
   `);
-  await db.query(`ALTER TABLE public.tendors ADD COLUMN IF NOT EXISTS "tendorCode" VARCHAR(50)`);
+  await db.query(`ALTER TABLE public.tendors ADD COLUMN IF NOT EXISTS tendor_code VARCHAR(50)`);
   await db.query(`
     UPDATE public.tendors
-    SET "tendorCode" = 'T' || REPLACE(id::text, '-', '')
-    WHERE "tendorCode" IS NULL OR "tendorCode" = ''
+    SET tendor_code = 'T' || REPLACE(id::text, '-', '')
+    WHERE tendor_code IS NULL OR tendor_code = ''
   `);
-  await db.query(`ALTER TABLE public.tendors ALTER COLUMN "tendorCode" SET NOT NULL`);
+  await db.query(`ALTER TABLE public.tendors ALTER COLUMN tendor_code SET NOT NULL`);
   await db.query(`
     UPDATE public.tendors AS duplicate
     SET "deletedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
@@ -112,14 +112,14 @@ await db.query(`
     UPDATE public.tendors AS duplicate
     SET "deletedAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
     WHERE duplicate."deletedAt" IS NULL
-      AND duplicate."tendorCode" IS NOT NULL
-      AND duplicate."tendorCode" <> ''
+      AND duplicate.tendor_code IS NOT NULL
+      AND duplicate.tendor_code <> ''
       AND duplicate.id NOT IN (
         SELECT kept.id FROM (
-          SELECT DISTINCT ON (LOWER("tendorCode")) id
+          SELECT DISTINCT ON (LOWER(tendor_code)) id
           FROM public.tendors
-          WHERE "deletedAt" IS NULL AND "tendorCode" IS NOT NULL AND "tendorCode" <> ''
-          ORDER BY LOWER("tendorCode"), "createdAt" ASC, id ASC
+          WHERE "deletedAt" IS NULL AND tendor_code IS NOT NULL AND tendor_code <> ''
+          ORDER BY LOWER(tendor_code), "createdAt" ASC, id ASC
         ) AS kept
       )
   `);
@@ -132,8 +132,8 @@ await db.query(`
   await db.query(`DROP INDEX IF EXISTS public.tendors_code_active_uidx`);
   await db.query(`
     CREATE UNIQUE INDEX tendors_code_active_uidx
-    ON public.tendors (LOWER(BTRIM("tendorCode")))
-    WHERE "deletedAt" IS NULL AND "tendorCode" IS NOT NULL AND BTRIM("tendorCode") <> ''
+    ON public.tendors (LOWER(BTRIM(tendor_code)))
+    WHERE "deletedAt" IS NULL AND tendor_code IS NOT NULL AND BTRIM(tendor_code) <> ''
   `);
   await db.query(`
     CREATE TABLE IF NOT EXISTS public.merchant_vendors (
@@ -152,8 +152,8 @@ await db.query(`
   await db.query(`ALTER TABLE public.merchant_tendors ADD COLUMN IF NOT EXISTS tendor_code VARCHAR(50)`);
   await db.query(`
     UPDATE public.merchant_tendors mt
-    SET tendor_code = t."tendorCode"
+    SET tendor_code = t.tendor_code
     FROM public.tendors t
-    WHERE mt.tendor_id = t.id AND mt.tendor_code IS DISTINCT FROM t."tendorCode"
+    WHERE mt.tendor_id = t.id AND mt.tendor_code IS DISTINCT FROM t.tendor_code
   `);
 }

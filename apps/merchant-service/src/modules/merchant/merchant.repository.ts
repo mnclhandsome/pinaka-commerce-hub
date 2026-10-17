@@ -93,8 +93,6 @@ import {
 import { OnboardingAuditEntity } from '../../entities/onboarding-audit.entity';
 import { SubscriptionPlanEntity } from '../../entities/subscription-plan.entity';
 import { WebsiteConnectionEntity } from '../../entities/website-connection.entity';
-import { CategoryEntity } from '../../entities/category.entity';
-import { ProductEntity } from '../../entities/product.entity';
 import { DeviceEntity } from '../../entities/device.entity';
 import { MerchantDeviceEntity } from '../../entities/merchant-device.entity';
 import { VendorEntity } from '../../entities/vendor.entity';
@@ -189,13 +187,13 @@ export class MerchantRepository implements OnModuleInit {
         'Merchant features require PostgreSQL',
       );
     const [merchant] = await this.dataSource.query(
-      `SELECT id, "merchantId", "merchantCode" FROM public.merchants
-       WHERE id::text=$1 OR "merchantId"=$1 OR "merchantCode"=$1 LIMIT 1`,
+      `SELECT id, merchant_id AS "merchantId", merchant_code AS "merchantCode" FROM public.merchants
+       WHERE id::text=$1 OR merchant_id=$1 OR merchant_code=$1 LIMIT 1`,
       [merchantId],
     );
     if (!merchant) throw new NotFoundException('Merchant not found');
     const [storeType] = await this.dataSource.query(
-      `SELECT id, "storeTypeCode", name FROM public.store_types WHERE id::text=$1 LIMIT 1`,
+      `SELECT id, store_type_code AS "storeTypeCode", name FROM public.store_types WHERE id::text=$1 LIMIT 1`,
       [storeTypeId],
     );
     if (!storeType) throw new NotFoundException('Store type not found');
@@ -235,13 +233,13 @@ export class MerchantRepository implements OnModuleInit {
       : '';
     if (planStoreTypeRef) {
       const [planStoreType] = await this.dataSource.query(
-        `SELECT id, "storeTypeCode", name FROM public.store_types
+        `SELECT id, store_type_code AS "storeTypeCode", name FROM public.store_types
          WHERE id::text = $1
-            OR lower(COALESCE("storeTypeCode", '')) = lower($1)
+            OR lower(COALESCE(store_type_code, '')) = lower($1)
             OR lower(COALESCE(name, '')) = lower($1)
          ORDER BY CASE
            WHEN id::text = $1 THEN 0
-           WHEN lower(COALESCE("storeTypeCode", '')) = lower($1) THEN 1
+           WHEN lower(COALESCE(store_type_code, '')) = lower($1) THEN 1
            WHEN lower(COALESCE(name, '')) = lower($1) THEN 2
            ELSE 3 END
          LIMIT 1`,
@@ -685,8 +683,6 @@ export class MerchantRepository implements OnModuleInit {
   private planRepo!: Repository<SubscriptionPlanEntity>;
   private auditRepo!: Repository<OnboardingAuditEntity>;
   private websiteConnectionRepo!: Repository<WebsiteConnectionEntity>;
-  private categoryRepo!: Repository<CategoryEntity>;
-  private productRepo!: Repository<ProductEntity>;
   private sessionRepo!: Repository<SessionEntity>;
   public deviceRepo!: Repository<DeviceEntity>;
   private redisClient?: Redis;
@@ -725,8 +721,6 @@ export class MerchantRepository implements OnModuleInit {
         OnboardingAuditEntity,
         SubscriptionPlanEntity,
         WebsiteConnectionEntity,
-        CategoryEntity,
-        ProductEntity,
         DeviceEntity,
         MerchantDeviceEntity,
         PosCurrencyTaxEntity,
@@ -809,8 +803,6 @@ export class MerchantRepository implements OnModuleInit {
     this.websiteConnectionRepo = this.dataSource.getRepository(
       WebsiteConnectionEntity,
     );
-    this.categoryRepo = this.dataSource.getRepository(CategoryEntity);
-    this.productRepo = this.dataSource.getRepository(ProductEntity);
     this.sessionRepo = this.dataSource.getRepository(SessionEntity);
     this.deviceRepo = this.dataSource.getRepository(DeviceEntity);
     this.isDbConnected = true;
@@ -1240,7 +1232,7 @@ export class MerchantRepository implements OnModuleInit {
 
   async resolveMerchantId(idOrUuid: string): Promise<string | null> {
     const rows = await this.dataSource.query(
-      'SELECT "merchantId" FROM public.merchants WHERE "merchantId"=$1 OR "merchantCode"=$1 OR id::text=$1 LIMIT 1',
+      'SELECT merchant_id AS "merchantId" FROM public.merchants WHERE merchant_id=$1 OR merchant_code=$1 OR id::text=$1 LIMIT 1',
       [idOrUuid],
     );
     return rows[0]?.merchantId || null;
@@ -1894,7 +1886,7 @@ export class MerchantRepository implements OnModuleInit {
       `SELECT
          payment.id,
          payment.order_id,
-         order_record.order_number,
+         store_sale.order_number,
          payment.merchant_id,
          payment.store_id,
          payment.local_id,
@@ -1925,7 +1917,6 @@ export class MerchantRepository implements OnModuleInit {
          payment.provider_transaction_id,
          payment.payment_at
        FROM public.store_pos_payments AS payment
-       LEFT JOIN public.orders AS order_record ON order_record.id = payment.order_id
        LEFT JOIN public.store_orders AS store_sale ON store_sale.order_id = payment.order_id
        WHERE payment.store_id = $1::uuid
          AND payment.deleted_at IS NULL
@@ -4018,11 +4009,8 @@ export class MerchantRepository implements OnModuleInit {
 
   async getStoreCatalog(
     storeId: string,
-  ): Promise<{ categories: CategoryEntity[]; products: unknown[] }> {
-    const categories = await this.categoryRepo.find({
-      where: { storeId },
-      order: { name: 'ASC' },
-    });
+  ): Promise<{ categories: unknown[]; products: unknown[] }> {
+    const taxonomy = await this.getStoreCatalogTaxonomiesByStoreId(storeId);
     let catalogRows: Array<{ payload?: unknown }> = [];
     try {
       catalogRows = await this.dataSource.query(
@@ -4041,10 +4029,8 @@ export class MerchantRepository implements OnModuleInit {
       if (postgresCode !== '42P01') throw error;
     }
     const savedProducts = catalogRows[0]?.payload;
-    if (Array.isArray(savedProducts) && savedProducts.length > 0) {
-      return {
-        categories,
-        products: savedProducts.map((value) => {
+    const products = Array.isArray(savedProducts)
+      ? savedProducts.map((value) => {
           const product = this.presentWooProduct(this.asRecord(value) ?? {}, null);
           const productCategories = Array.isArray(product.categories)
             ? product.categories
@@ -4058,15 +4044,9 @@ export class MerchantRepository implements OnModuleInit {
             category: firstCategory?.name ?? '',
             image: firstImage?.src ?? null,
           };
-        }),
-      };
-    }
-
-    const products = await this.productRepo.find({
-      where: { storeId },
-      order: { name: 'ASC' },
-    });
-    return { categories, products };
+        })
+      : [];
+    return { categories: taxonomy.categories, products };
   }
 
   private async fetchWordPressCategoryCatalog(
@@ -4117,79 +4097,6 @@ export class MerchantRepository implements OnModuleInit {
     };
     walk(nodes);
     return flattened;
-  }
-
-  private async upsertStoreCategory(
-    merchantId: string,
-    storeId: string,
-    node: WordPressCategoryNode,
-  ): Promise<CategoryEntity> {
-    const wordpressId = Number(node.id);
-    const categoryJson = { ...node };
-    delete categoryJson.products;
-    delete categoryJson.children;
-    const fields = {
-      merchantId,
-      storeId,
-      wordpressId,
-      parentWordpressId: Number(node.parent || 0),
-      name: String(node.name || '').trim() || `Category ${wordpressId}`,
-      slug: String(node.slug || ''),
-      description: String(node.description || ''),
-      productCount: Number(node.count || 0),
-      image: node.image ? String(node.image) : null,
-      posTaxClass: String(node.pos_tax_class || ''),
-      posTaxPercent: String(node.pos_tax_percent || ''),
-      payload: categoryJson as Record<string, unknown>,
-      updatedAt: new Date(),
-    };
-    const existing = await this.categoryRepo.findOneBy({
-      storeId,
-      wordpressId,
-    });
-    return this.categoryRepo.save(
-      existing
-        ? Object.assign(existing, fields)
-        : this.categoryRepo.create(fields),
-    );
-  }
-
-  private async upsertStoreProduct(
-    merchantId: string,
-    storeId: string,
-    category: CategoryEntity,
-    product: WordPressProductNode,
-  ): Promise<ProductEntity> {
-    const wordpressId = Number(product.id);
-    const priceRaw =
-      product.price === undefined ||
-      product.price === null ||
-      String(product.price).trim() === ''
-        ? null
-        : String(Number.parseFloat(String(product.price)));
-    const fields = {
-      merchantId,
-      storeId,
-      categoryId: category.id,
-      wordpressId,
-      wordpressCategoryId: category.wordpressId,
-      name: String(product.name || '').trim() || `Product ${wordpressId}`,
-      price: Number.isFinite(Number(priceRaw)) ? priceRaw : null,
-      image: product.image ? String(product.image) : null,
-      tags: Array.isArray(product.tags) ? product.tags : [],
-      payload: product as Record<string, unknown>,
-      updatedAt: new Date(),
-    };
-    const existing = await this.productRepo.findOneBy({
-      storeId,
-      wordpressId,
-      wordpressCategoryId: category.wordpressId,
-    });
-    return this.productRepo.save(
-      existing
-        ? Object.assign(existing, fields)
-        : this.productRepo.create(fields),
-    );
   }
 
   // --- Master Reference Data: store_types CRUD Methods ---
@@ -5360,7 +5267,7 @@ export class MerchantRepository implements OnModuleInit {
          ) DESC
          LIMIT 1
        ) s ON true
-       WHERE m.id::text = $1 OR m."merchantId" = $1 OR m."merchantCode" = $1
+       WHERE m.id::text = $1 OR m.merchant_id = $1 OR m.merchant_code = $1
        LIMIT 1`,
       [merchantId],
     );

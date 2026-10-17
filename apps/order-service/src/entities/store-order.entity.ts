@@ -32,6 +32,45 @@ export class StoreOrderEntity {
   @Column({ type: 'varchar', length: 100, default: 'UTC' })
   timezone!: string;
 
+  @Column({ name: 'order_number', type: 'varchar', length: 100, default: '' })
+  orderNumber!: string;
+
+  @Column({ name: 'customer_name', type: 'varchar', length: 150, default: 'Walk-in Customer' })
+  customerName!: string;
+
+  @Column({ name: 'customer_phone', type: 'varchar', length: 50, nullable: true })
+  customerPhone?: string;
+
+  @Column({ name: 'order_type', type: 'varchar', length: 50, default: 'IN_STORE_POS' })
+  orderType!: string;
+
+  @Column({ name: 'payment_method_code', type: 'varchar', length: 50, nullable: true })
+  paymentMethodCode?: string;
+
+  @Column({ name: 'payment_status', type: 'varchar', length: 50, default: 'PAID' })
+  paymentStatus!: string;
+
+  @Column({ name: 'tip_amount', type: 'decimal', precision: 12, scale: 2, default: 0 })
+  tipAmount!: number;
+
+  @Column({ type: 'boolean', default: false })
+  offline!: boolean;
+
+  @Column({ name: 'local_shift_id', type: 'varchar', length: 100, nullable: true })
+  localShiftId?: string;
+
+  @Column({ type: 'jsonb', nullable: true })
+  metadata?: Array<{ key: string; value: unknown }>;
+
+  @Column({ name: 'request_payload', type: 'jsonb', nullable: true })
+  requestPayload?: Record<string, unknown>;
+
+  @Column({ name: 'order_status', type: 'varchar', length: 50, default: 'CREATED' })
+  orderStatus!: string;
+
+  @Column({ name: 'status_history', type: 'jsonb', default: () => "'[]'" })
+  statusHistory!: unknown[];
+
   @Column({ name: 'payment_method', type: 'varchar', length: 50, nullable: true })
   paymentMethod?: string;
 

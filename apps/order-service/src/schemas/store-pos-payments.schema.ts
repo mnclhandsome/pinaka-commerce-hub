@@ -18,7 +18,7 @@ export async function ensureStorePosPaymentsSchema(db: DataSource): Promise<void
     await manager.query(`
       CREATE TABLE IF NOT EXISTS public.store_pos_payments (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        order_id uuid NOT NULL REFERENCES public.orders(id) ON DELETE CASCADE,
+        order_id uuid NOT NULL REFERENCES public.store_orders(order_id) ON DELETE CASCADE,
         merchant_id uuid NOT NULL,
         store_id uuid NOT NULL REFERENCES public.stores(id) ON DELETE CASCADE,
         local_id varchar(150),

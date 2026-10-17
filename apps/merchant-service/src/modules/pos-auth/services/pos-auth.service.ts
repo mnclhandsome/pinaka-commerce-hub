@@ -55,12 +55,12 @@ export class PosAuthService {
     const dataSource = this.merchantRepository.requireDataSource();
     const merchants: any[] = await dataSource.query(
       `SELECT id, 
-              COALESCE("merchant_code", "merchantCode") AS "merchantCode", 
-              COALESCE("merchant_id", "merchantId") AS "merchantId", 
+              merchant_code AS "merchantCode", 
+              merchant_id AS "merchantId", 
               "business_display_name" AS "businessDisplayName", 
               "first_name" AS "firstName", "last_name" AS "lastName", email, phone, status 
        FROM public.merchants 
-       WHERE (lower(email) = lower($1) OR "merchant_code" = $1 OR "merchantCode" = $1 OR "merchant_id" = $1 OR "merchantId" = $1 OR id::text = $1 OR lower("business_display_name") = lower($1)) 
+       WHERE (lower(email) = lower($1) OR "merchant_code" = $1 OR merchant_code = $1 OR "merchant_id" = $1 OR merchant_id = $1 OR id::text = $1 OR lower("business_display_name") = lower($1)) 
        LIMIT 1`,
       [rawMerchant],
     );
@@ -82,7 +82,7 @@ export class PosAuthService {
                 "store_website_url" AS "storeWebsiteUrl", "address_line1" AS "addressLine1", 
                 city, state, country, "operational_status" AS "operationalStatus", status, "website_connector"
          FROM public.stores 
-         WHERE (merchant_id::text = $1 OR merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $1 OR "merchant_id" = $1 OR "merchantId" = $1 OR "merchant_code" = $1 OR "merchantCode" = $1))
+         WHERE (merchant_id::text = $1 OR merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $1 OR "merchant_id" = $1 OR merchant_id = $1 OR "merchant_code" = $1 OR merchant_code = $1))
            AND (id::text = $2 OR lower(store_code) = lower($2) OR lower(store_name) = lower($2))
          LIMIT 1`,
         [String(merchant.id), rawStore],
@@ -97,7 +97,7 @@ export class PosAuthService {
                 "store_website_url" AS "storeWebsiteUrl", "address_line1" AS "addressLine1", 
                 city, state, country, "operational_status" AS "operationalStatus", status, "website_connector"
          FROM public.stores 
-         WHERE (merchant_id::text = $1 OR merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $1 OR "merchant_id" = $1 OR "merchantId" = $1 OR "merchant_code" = $1 OR "merchantCode" = $1))
+         WHERE (merchant_id::text = $1 OR merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $1 OR "merchant_id" = $1 OR merchant_id = $1 OR "merchant_code" = $1 OR merchant_code = $1))
            AND (status IS NULL OR UPPER(status::text) <> 'INACTIVE')
          ORDER BY created_at ASC
          LIMIT 1`,
@@ -217,12 +217,12 @@ export class PosAuthService {
       if (targetMerchantId) {
         const merchants = await dataSource.query(
           `SELECT id, 
-                  COALESCE("merchant_code", "merchantCode") AS "merchantCode", 
-                  COALESCE("merchant_id", "merchantId") AS "merchantId", 
+                  merchant_code AS "merchantCode", 
+                  merchant_id AS "merchantId", 
                   "business_display_name" AS "businessDisplayName", 
                   "first_name" AS "firstName", "last_name" AS "lastName", email, phone, status 
            FROM public.merchants 
-           WHERE (id::text = $1 OR "merchant_id" = $1 OR "merchantId" = $1 OR "merchant_code" = $1 OR "merchantCode" = $1 OR lower(email) = lower($1))
+           WHERE (id::text = $1 OR "merchant_id" = $1 OR merchant_id = $1 OR "merchant_code" = $1 OR merchant_code = $1 OR lower(email) = lower($1))
            LIMIT 1`,
           [String(targetMerchantId).trim()],
         );
@@ -241,7 +241,7 @@ export class PosAuthService {
         let storeParams: any[] = [String(targetStoreId).trim()];
         if (targetMerchantId) {
           storeParams.push(String(targetMerchantId));
-          storeWhere += ` AND (merchant_id::text = $2 OR merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $2 OR "merchant_id" = $2 OR "merchantId" = $2 OR "merchant_code" = $2 OR "merchantCode" = $2))`;
+          storeWhere += ` AND (merchant_id::text = $2 OR merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $2 OR "merchant_id" = $2 OR merchant_id = $2 OR "merchant_code" = $2 OR merchant_code = $2))`;
         }
         const stores = await dataSource.query(
           `SELECT id, "store_code" AS "storeCode", 
@@ -301,7 +301,7 @@ export class PosAuthService {
       `;
       if (targetMerchantId) {
         queryParams.push(String(targetMerchantId));
-        candidateQuery += ` AND (e.merchant_id::text = $${queryParams.length} OR es.merchant_id::text = $${queryParams.length} OR e.merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $${queryParams.length} OR "merchant_id" = $${queryParams.length} OR "merchantId" = $${queryParams.length} OR "merchant_code" = $${queryParams.length} OR "merchantCode" = $${queryParams.length}))`;
+        candidateQuery += ` AND (e.merchant_id::text = $${queryParams.length} OR es.merchant_id::text = $${queryParams.length} OR e.merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $${queryParams.length} OR "merchant_id" = $${queryParams.length} OR merchant_id = $${queryParams.length} OR "merchant_code" = $${queryParams.length} OR merchant_code = $${queryParams.length}))`;
       }
       if (rawEmployeeCode) {
         queryParams.push(rawEmployeeCode);
@@ -334,7 +334,7 @@ export class PosAuthService {
         `;
         if (targetMerchantId) {
           merchantParams.push(String(targetMerchantId));
-          merchantEmpQuery += ` AND (e.merchant_id::text = $${merchantParams.length} OR e.merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $${merchantParams.length} OR "merchant_id" = $${merchantParams.length} OR "merchantId" = $${merchantParams.length} OR "merchant_code" = $${merchantParams.length} OR "merchantCode" = $${merchantParams.length}))`;
+          merchantEmpQuery += ` AND (e.merchant_id::text = $${merchantParams.length} OR e.merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $${merchantParams.length} OR "merchant_id" = $${merchantParams.length} OR merchant_id = $${merchantParams.length} OR "merchant_code" = $${merchantParams.length} OR merchant_code = $${merchantParams.length}))`;
         }
         if (rawEmployeeCode) {
           merchantParams.push(rawEmployeeCode);
@@ -386,12 +386,12 @@ export class PosAuthService {
       if (!merchant && targetMerchantId) {
         const merchants = await dataSource.query(
           `SELECT id, 
-                  COALESCE("merchant_code", "merchantCode") AS "merchantCode", 
-                  COALESCE("merchant_id", "merchantId") AS "merchantId", 
+                  merchant_code AS "merchantCode", 
+                  merchant_id AS "merchantId", 
                   "business_display_name" AS "businessDisplayName", 
                   "first_name" AS "firstName", "last_name" AS "lastName", email, phone, status 
            FROM public.merchants 
-           WHERE (id::text = $1 OR "merchant_id" = $1 OR "merchantId" = $1 OR "merchant_code" = $1 OR "merchantCode" = $1)
+           WHERE (id::text = $1 OR "merchant_id" = $1 OR merchant_id = $1 OR "merchant_code" = $1 OR merchant_code = $1)
            LIMIT 1`,
           [String(targetMerchantId)],
         );
@@ -406,7 +406,7 @@ export class PosAuthService {
                   "store_name" AS "storeName", 
                   "store_website_url" AS "storeWebsiteUrl", status, merchant_id AS "merchantId"
            FROM public.stores 
-           WHERE (merchant_id::text = $1 OR merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $1 OR "merchant_id" = $1 OR "merchantId" = $1 OR "merchant_code" = $1 OR "merchantCode" = $1)) 
+           WHERE (merchant_id::text = $1 OR merchant_id IN (SELECT id FROM public.merchants WHERE id::text = $1 OR "merchant_id" = $1 OR merchant_id = $1 OR "merchant_code" = $1 OR merchant_code = $1)) 
              AND (status IS NULL OR UPPER(status::text) <> 'INACTIVE')
            ORDER BY created_at ASC
            LIMIT 1`,
@@ -775,11 +775,11 @@ export class PosAuthService {
     }
 
     const merchants = await dataSource.query(
-      `SELECT id::text AS id, "merchantCode", "merchantId", status
+      `SELECT id::text AS id, merchant_code AS "merchantCode", merchant_id AS "merchantId", status
        FROM public.merchants
        WHERE id::text = $1
-          OR "merchantId"::text = $1
-          OR "merchantCode" = $1
+          OR merchant_id::text = $1
+          OR merchant_code = $1
           OR lower(email) = lower($1)
        LIMIT 1`,
       [merchantKey],
@@ -804,7 +804,7 @@ export class PosAuthService {
            merchant_id::text = $2
            OR merchant_id IN (
              SELECT id FROM public.merchants
-             WHERE id::text = $2 OR "merchantId"::text = $2 OR "merchantCode" = $2
+             WHERE id::text = $2 OR merchant_id::text = $2 OR merchant_code = $2
            )
          )
        LIMIT 1`,
@@ -851,73 +851,60 @@ export class PosAuthService {
   private async queryStoreProducts(scope: CatalogScope): Promise<CatalogProduct[]> {
     const rows = await this.queryCatalog(
       scope,
-      `SELECT id::text AS id,
-              "merchantId",
-              "storeId",
-              "categoryId"::text AS "categoryId",
-              "wordpressId",
-              "wordpressCategoryId",
-              name,
-              price,
-              image,
-              tags,
-              payload
-       FROM public.products
-       WHERE "merchantId" = ANY($1::text[])
-         AND "storeId" = ANY($2::text[])
-       ORDER BY name ASC, id ASC`,
+      `SELECT store_id::text AS store_id, payload
+         FROM public.store_products
+        WHERE store_id::text = ANY($2::text[])
+          AND COALESCE(is_deleted, false) = false`,
     );
-    return rows.map((row) => ({
-      id: String(row.id),
-      merchantId: String(row.merchantId || ''),
-      storeId: String(row.storeId || ''),
-      categoryId: row.categoryId ? String(row.categoryId) : null,
-      wordpressId: row.wordpressId ?? null,
-      wordpressCategoryId: row.wordpressCategoryId ?? null,
-      name: String(row.name || ''),
-      price: row.price ?? null,
-      image: row.image ?? null,
-      tags: Array.isArray(row.tags) ? row.tags : [],
-      payload: row.payload ?? {},
-    }));
+    return rows.flatMap((row) => {
+      const products = Array.isArray(row.payload) ? row.payload : [];
+      return products.map((value: Record<string, any>) => {
+        const categories = Array.isArray(value?.categories) ? value.categories : [];
+        const first = categories[0] || {};
+        const images = Array.isArray(value?.images) ? value.images : [];
+        return {
+          id: String(value?.id ?? ''),
+          merchantId: String(scope.merchant.id || ''),
+          storeId: String(row.store_id || ''),
+          categoryId: first?.id != null ? String(first.id) : null,
+          wordpressId: value?.id ?? null,
+          wordpressCategoryId: first?.id ?? null,
+          name: String(value?.name || ''),
+          price: value?.price ?? null,
+          image: images[0]?.src ?? value?.image ?? null,
+          tags: Array.isArray(value?.tags) ? value.tags : [],
+          payload: value ?? {},
+        };
+      });
+    });
   }
 
   private async queryStoreCategories(scope: CatalogScope): Promise<CatalogCategory[]> {
     const rows = await this.queryCatalog(
       scope,
-      `SELECT id::text AS id,
-              "merchantId",
-              "storeId",
-              "wordpressId",
-              "parentWordpressId",
-              name,
-              slug,
-              description,
-              "productCount",
-              image,
-              "posTaxClass",
-              "posTaxPercent",
-              payload
-       FROM public.categories
-       WHERE "merchantId" = ANY($1::text[])
-         AND "storeId" = ANY($2::text[])
-       ORDER BY name ASC, id ASC`,
+      `SELECT store_id::text AS store_id, payload
+         FROM public.store_categories
+        WHERE store_id::text = ANY($2::text[])
+          AND COALESCE(is_deleted, false) = false`,
     );
-    return rows.map((row) => ({
-      id: String(row.id),
-      merchantId: String(row.merchantId || ''),
-      storeId: String(row.storeId || ''),
-      wordpressId: row.wordpressId ?? null,
-      parentWordpressId: row.parentWordpressId ?? 0,
-      name: String(row.name || ''),
-      slug: String(row.slug || ''),
-      description: String(row.description || ''),
-      productCount: Number(row.productCount || 0),
-      image: row.image ?? null,
-      posTaxClass: String(row.posTaxClass || ''),
-      posTaxPercent: String(row.posTaxPercent || ''),
-      payload: row.payload ?? {},
-    }));
+    return rows.flatMap((row) => {
+      const categories = Array.isArray(row.payload) ? row.payload : [];
+      return categories.map((value: Record<string, any>) => ({
+        id: String(value?.id ?? value?.wordpressId ?? ''),
+        merchantId: String(scope.merchant.id || ''),
+        storeId: String(row.store_id || value?.storeId || ''),
+        wordpressId: value?.id ?? value?.wordpressId ?? null,
+        parentWordpressId: Number(value?.parent ?? value?.parentWordpressId ?? 0),
+        name: String(value?.name || ''),
+        slug: String(value?.slug || ''),
+        description: String(value?.description || ''),
+        productCount: Number(value?.count ?? value?.productCount ?? 0),
+        image: value?.image?.src ?? value?.image ?? null,
+        posTaxClass: String(value?.pos_tax_class ?? value?.posTaxClass ?? ''),
+        posTaxPercent: String(value?.pos_tax_percent ?? value?.posTaxPercent ?? ''),
+        payload: value?.payload ?? value ?? {},
+      }));
+    });
   }
 
   private async queryCatalog(scope: CatalogScope, sql: string): Promise<Array<Record<string, any>>> {

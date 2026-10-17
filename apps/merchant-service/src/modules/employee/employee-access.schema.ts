@@ -59,7 +59,7 @@ export async function ensureEmployeeAccessSchema(db: DataSource): Promise<void> 
             created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
           );
           CREATE TABLE IF NOT EXISTS public.roles (
-            id uuid PRIMARY KEY DEFAULT gen_random_uuid(), merchant_id __MERCHANT_TYPE__ NOT NULL REFERENCES public.merchants("merchantCode"),
+            id uuid PRIMARY KEY DEFAULT gen_random_uuid(), merchant_id __MERCHANT_TYPE__ NOT NULL REFERENCES public.merchants(merchant_code),
             source_role_template_id uuid REFERENCES public.role_templates(id), role_code varchar(50) NOT NULL,
             name varchar(100) NOT NULL, description text NOT NULL DEFAULT '', scope_type varchar(20) NOT NULL DEFAULT 'STORE',
             is_custom boolean NOT NULL DEFAULT true, status varchar(20) NOT NULL DEFAULT 'ACTIVE',
@@ -234,7 +234,7 @@ export async function ensureEmployeeAccessSchema(db: DataSource): Promise<void> 
           ALTER TABLE public.employees ADD COLUMN IF NOT EXISTS merchant_uuid_tmp uuid;
           EXECUTE $sql$
             UPDATE public.employees e SET merchant_uuid_tmp=m.id FROM public.merchants m
-            WHERE COALESCE(m."merchantCode", m."merchantId", m.id::text)=e.merchant_id::text OR m.id::text=e.merchant_id::text
+            WHERE COALESCE(m.merchant_code, m.merchant_id, m.id::text)=e.merchant_id::text OR m.id::text=e.merchant_id::text
           $sql$;
           IF EXISTS (SELECT 1 FROM public.employees WHERE merchant_uuid_tmp IS NULL) THEN
             RAISE EXCEPTION 'Cannot migrate employees: unresolved merchant_id';
@@ -338,7 +338,7 @@ export async function ensureEmployeeAccessSchema(db: DataSource): Promise<void> 
           UPDATE public.role_permissions rp SET merchant_id_uuid = m.id::uuid
             FROM public.merchants m
             WHERE rp.merchant_id IS NOT NULL
-              AND rp.merchant_id::text IN (m.id::text, COALESCE(m."merchantCode", m."merchantId", m.id::text));
+              AND rp.merchant_id::text IN (m.id::text, COALESCE(m.merchant_code, m.merchant_id, m.id::text));
           ALTER TABLE public.role_permissions DROP COLUMN merchant_id;
           ALTER TABLE public.role_permissions RENAME COLUMN merchant_id_uuid TO merchant_id;
         END IF;

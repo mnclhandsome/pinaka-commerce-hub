@@ -384,7 +384,7 @@ async function backfillRequiredColumnsBeforeSync(dataSource: DataSource): Promis
         const storeTypeCol = (await columnExists(dataSource, table, 'storeType')) ? '"storeType"' : '';
         if (storeTypeCol) {
           await dataSource.query(
-            `UPDATE ${quotedTable} AS row SET store_type_id = st.id FROM public.store_types st WHERE row.store_type_id IS NULL AND (row.${storeTypeCol} = st."storeTypeCode" OR row.${storeTypeCol} = st.name OR row.${storeTypeCol} = st.id::text)`,
+            `UPDATE ${quotedTable} AS row SET store_type_id = st.id FROM public.store_types st WHERE row.store_type_id IS NULL AND (row.${storeTypeCol} = st.store_type_code OR row.${storeTypeCol} = st.name OR row.${storeTypeCol} = st.id::text)`,
           );
         }
         await dataSource.query(
@@ -608,6 +608,9 @@ async function backfillOptionalUniqueColumns(dataSource: DataSource): Promise<vo
  * can read and write the same rows.
  */
 async function ensureLegacyQueryColumns(dataSource: DataSource): Promise<void> {
+  if (await tableExists(dataSource, 'subscription_plans') && await columnExists(dataSource, 'subscription_plans', 'planCode')) {
+    await dataSource.query(`ALTER TABLE public.subscription_plans RENAME COLUMN "planCode" TO plan_code`);
+  }
   const install = async (table: string, requiredColumn: string, sql: string) => {
     if (!(await tableExists(dataSource, table))) return;
     if (!(await columnExists(dataSource, table, requiredColumn))) return;
@@ -670,62 +673,67 @@ async function ensureLegacyQueryColumns(dataSource: DataSource): Promise<void> {
     ALTER TABLE public.merchants ALTER COLUMN updated_at DROP DEFAULT;
     ALTER TABLE public.merchants ALTER COLUMN updated_by DROP NOT NULL;
     ALTER TABLE public.merchants ALTER COLUMN updated_by DROP DEFAULT;
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "merchantId" varchar(100);
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "merchantCode" varchar(100);
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "businessName" varchar(255);
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "businessDisplayName" varchar(255);
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "addressLine1" text;
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "addressLine2" text;
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "postalCode" varchar(30);
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "firstName" varchar(100);
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "lastName" varchar(100);
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "createdAt" timestamptz;
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "updatedAt" timestamptz;
-    ALTER TABLE public.merchants ADD COLUMN IF NOT EXISTS "createdDate" timestamptz;
-    UPDATE public.merchants SET
-      "merchantId" = merchant_id,
-      "merchantCode" = merchant_code,
-      "businessName" = business_display_name,
-      "businessDisplayName" = business_display_name,
-      "addressLine1" = address_line1,
-      "addressLine2" = address_line2,
-      "postalCode" = postal_code,
-      "firstName" = first_name,
-      "lastName" = last_name,
-      "createdAt" = NULLIF(created_at::text, '')::timestamptz,
-      "updatedAt" = NULLIF(updated_at::text, '')::timestamptz,
-      "createdDate" = NULLIF(created_at::text, '')::timestamptz;
     CREATE OR REPLACE FUNCTION public.sync_merchants_legacy_cols() RETURNS trigger AS $fn$
     BEGIN
-      NEW.merchant_code := COALESCE(NULLIF(NEW.merchant_code, ''), NULLIF(NEW."merchantCode", ''), 'MCH-' || left(COALESCE(NEW.id::text, gen_random_uuid()::text), 8));
-      NEW."merchantCode" := COALESCE(NULLIF(NEW."merchantCode", ''), NEW.merchant_code);
-      NEW.merchant_id := COALESCE(NULLIF(NEW.merchant_id, ''), NULLIF(NEW."merchantId", ''));
-      IF NEW.merchant_id IS NULL OR NEW.merchant_id = NEW.merchant_code THEN
+      NEW.merchant_code := COALESCE(NULLIF(NEW.merchant_code, ''), 'MCH-' || left(COALESCE(NEW.id::text, gen_random_uuid()::text), 8));
+      IF NEW.merchant_id IS NULL OR NEW.merchant_id = '' OR NEW.merchant_id = NEW.merchant_code THEN
         NEW.merchant_id := 'MID-' || left(COALESCE(NEW.id::text, gen_random_uuid()::text), 8);
       END IF;
-      NEW."merchantId" := NEW.merchant_id;
-      NEW.business_display_name := COALESCE(NEW.business_display_name, NEW."businessDisplayName", NEW."businessName");
-      NEW."businessName" := COALESCE(NEW."businessName", NEW.business_display_name);
-      NEW."businessDisplayName" := COALESCE(NEW."businessDisplayName", NEW.business_display_name);
-      NEW.address_line1 := COALESCE(NEW.address_line1, NEW."addressLine1");
-      NEW."addressLine1" := COALESCE(NEW."addressLine1", NEW.address_line1);
-      NEW.address_line2 := COALESCE(NEW.address_line2, NEW."addressLine2");
-      NEW."addressLine2" := COALESCE(NEW."addressLine2", NEW.address_line2);
-      NEW.postal_code := COALESCE(NEW.postal_code, NEW."postalCode");
-      NEW."postalCode" := COALESCE(NEW."postalCode", NEW.postal_code);
-      NEW.first_name := COALESCE(NEW.first_name, NEW."firstName");
-      NEW."firstName" := COALESCE(NEW."firstName", NEW.first_name);
-      NEW.last_name := COALESCE(NEW.last_name, NEW."lastName");
-      NEW."lastName" := COALESCE(NEW."lastName", NEW.last_name);
-      NEW."createdAt" := COALESCE(NEW."createdAt", NULLIF(NEW.created_at::text, '')::timestamptz, now());
-      NEW."updatedAt" := COALESCE(NEW."updatedAt", NULLIF(NEW.updated_at::text, '')::timestamptz, now());
-      NEW."createdDate" := COALESCE(NEW."createdDate", NULLIF(NEW.created_at::text, '')::timestamptz, now());
       RETURN NEW;
     END;
     $fn$ LANGUAGE plpgsql;
     DROP TRIGGER IF EXISTS merchants_legacy_cols ON public.merchants;
     CREATE TRIGGER merchants_legacy_cols BEFORE INSERT OR UPDATE ON public.merchants
       FOR EACH ROW EXECUTE PROCEDURE public.sync_merchants_legacy_cols();
+    DO $drop_merchant_camel$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='merchants' AND column_name='merchantId') THEN
+        UPDATE public.merchants SET merchant_id = COALESCE(NULLIF(merchant_id, ''), "merchantId") WHERE COALESCE("merchantId", '') <> '';
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='merchants' AND column_name='businessDisplayName') THEN
+        UPDATE public.merchants SET business_display_name = COALESCE(business_display_name, "businessDisplayName") WHERE business_display_name IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='merchants' AND column_name='businessName') THEN
+        UPDATE public.merchants SET business_display_name = COALESCE(business_display_name, "businessName") WHERE business_display_name IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='merchants' AND column_name='addressLine1') THEN
+        UPDATE public.merchants SET address_line1 = COALESCE(address_line1, "addressLine1") WHERE address_line1 IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='merchants' AND column_name='addressLine2') THEN
+        UPDATE public.merchants SET address_line2 = COALESCE(address_line2, "addressLine2") WHERE address_line2 IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='merchants' AND column_name='postalCode') THEN
+        UPDATE public.merchants SET postal_code = COALESCE(postal_code, "postalCode") WHERE postal_code IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='merchants' AND column_name='firstName') THEN
+        UPDATE public.merchants SET first_name = COALESCE(first_name, "firstName") WHERE first_name IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='merchants' AND column_name='lastName') THEN
+        UPDATE public.merchants SET last_name = COALESCE(last_name, "lastName") WHERE last_name IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='merchants' AND column_name='createdAt') THEN
+        UPDATE public.merchants SET created_at = COALESCE(created_at, "createdAt") WHERE created_at IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='merchants' AND column_name='createdDate') THEN
+        UPDATE public.merchants SET created_at = COALESCE(created_at, "createdDate") WHERE created_at IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='merchants' AND column_name='updatedAt') THEN
+        UPDATE public.merchants SET updated_at = COALESCE(updated_at, "updatedAt") WHERE updated_at IS NULL;
+      END IF;
+      ALTER TABLE public.merchants
+        DROP COLUMN IF EXISTS "merchantId",
+        DROP COLUMN IF EXISTS "businessName",
+        DROP COLUMN IF EXISTS "businessDisplayName",
+        DROP COLUMN IF EXISTS "addressLine1",
+        DROP COLUMN IF EXISTS "addressLine2",
+        DROP COLUMN IF EXISTS "postalCode",
+        DROP COLUMN IF EXISTS "firstName",
+        DROP COLUMN IF EXISTS "lastName",
+        DROP COLUMN IF EXISTS "createdAt",
+        DROP COLUMN IF EXISTS "createdDate",
+        DROP COLUMN IF EXISTS "updatedAt";
+    END;
+    $drop_merchant_camel$;
   `);
 
   await install('features', 'feature_code', `
@@ -826,147 +834,138 @@ async function ensureLegacyQueryColumns(dataSource: DataSource): Promise<void> {
   await install('features', 'feature_key', featureAuditAndCodeSql);
 
   await install('store_types', 'store_type_code', `
-    ALTER TABLE public.store_types ADD COLUMN IF NOT EXISTS "storeTypeCode" varchar(100);
-    UPDATE public.store_types SET "storeTypeCode" = store_type_code WHERE "storeTypeCode" IS NULL;
     DROP TRIGGER IF EXISTS store_types_legacy_cols ON public.store_types CASCADE;
     DROP FUNCTION IF EXISTS public.sync_store_types_legacy_cols() CASCADE;
+    DO $drop_store_type_code$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='store_types' AND column_name='storeTypeCode') THEN
+        UPDATE public.store_types SET store_type_code = COALESCE(NULLIF(store_type_code, ''), "storeTypeCode") WHERE COALESCE("storeTypeCode", '') <> '';
+        ALTER TABLE public.store_types DROP COLUMN "storeTypeCode";
+      END IF;
+    END;
+    $drop_store_type_code$;
   `);
 
   await install('subscriptions', 'subscription_code', `
-    ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS "merchantId" varchar(100);
     ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS "subscriptionId" varchar(100);
-    ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS "subscriptionCode" varchar(100);
+    ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS subscription_code varchar(100);
     ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS start_date date;
-    ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS "startDate" date;
     ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS renewal_date date;
-    ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS "renewalDate" date;
     ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS trial_end_date date;
-    ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS "trialEndDate" date;
-    ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS "createdAt" timestamptz;
-    ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS "updatedAt" timestamptz;
     CREATE OR REPLACE FUNCTION public.sync_subscriptions_legacy_cols() RETURNS trigger AS $fn$
     BEGIN
       IF NEW.price IS NULL THEN NEW.price := 0; END IF;
-      NEW.subscription_code := COALESCE(NULLIF(NEW.subscription_code, ''), NULLIF(NEW."subscriptionCode", ''), NULLIF(NEW."subscriptionId", ''), NEW.id::text);
-      NEW."subscriptionCode" := COALESCE(NULLIF(NEW."subscriptionCode", ''), NEW.subscription_code);
+      NEW.subscription_code := COALESCE(NULLIF(NEW.subscription_code, ''), NULLIF(NEW."subscriptionId", ''), NEW.id::text);
       NEW."subscriptionId" := COALESCE(NULLIF(NEW."subscriptionId", ''), NEW.subscription_code);
-      IF NEW.merchant_id IS NULL AND NEW."merchantId" IS NOT NULL THEN
-        SELECT m.id::text INTO NEW.merchant_id FROM public.merchants m
-         WHERE m.merchant_id = NEW."merchantId" OR m.merchant_code = NEW."merchantId" OR m.id::text = NEW."merchantId"
-         LIMIT 1;
-      END IF;
-      IF NEW.merchant_id IS NOT NULL THEN
-        IF EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_schema = 'public' AND table_name = 'merchants' AND column_name = 'merchant_id'
-        ) THEN
-          EXECUTE 'SELECT merchant_id FROM public.merchants WHERE id::text = $1 LIMIT 1'
-            INTO NEW."merchantId" USING NEW.merchant_id::text;
-        ELSIF EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_schema = 'public' AND table_name = 'merchants' AND column_name = 'merchantId'
-        ) THEN
-          EXECUTE 'SELECT "merchantId" FROM public.merchants WHERE id::text = $1 LIMIT 1'
-            INTO NEW."merchantId" USING NEW.merchant_id::text;
-        END IF;
-      END IF;
-      NEW.start_date := COALESCE(NEW.start_date, NEW."startDate");
-      NEW."startDate" := COALESCE(NEW."startDate", NEW.start_date);
-      NEW.renewal_date := COALESCE(NEW.renewal_date, NEW."renewalDate");
-      NEW."renewalDate" := COALESCE(NEW."renewalDate", NEW.renewal_date);
-      NEW.trial_end_date := COALESCE(NEW.trial_end_date, NEW."trialEndDate");
-      NEW."trialEndDate" := COALESCE(NEW."trialEndDate", NEW.trial_end_date);
-      NEW."createdAt" := COALESCE(NEW."createdAt", NULLIF(NEW.created_at::text, '')::timestamptz, now());
-      NEW."updatedAt" := COALESCE(NEW."updatedAt", NULLIF(NEW.updated_at::text, '')::timestamptz, now());
       RETURN NEW;
     END;
     $fn$ LANGUAGE plpgsql;
     DROP TRIGGER IF EXISTS subscriptions_legacy_cols ON public.subscriptions;
     CREATE TRIGGER subscriptions_legacy_cols BEFORE INSERT OR UPDATE ON public.subscriptions
       FOR EACH ROW EXECUTE PROCEDURE public.sync_subscriptions_legacy_cols();
-    UPDATE public.subscriptions s SET
-      "subscriptionId" = s.subscription_code,
-      "subscriptionCode" = s.subscription_code,
-      "startDate" = COALESCE(s."startDate", s.start_date),
-      "renewalDate" = COALESCE(s."renewalDate", s.renewal_date),
-      "trialEndDate" = COALESCE(s."trialEndDate", s.trial_end_date),
-      "createdAt" = NULLIF(s.created_at::text, '')::timestamptz,
-      "updatedAt" = NULLIF(s.updated_at::text, '')::timestamptz;
-    UPDATE public.subscriptions s SET "merchantId" = COALESCE(to_jsonb(m)->>'merchant_id', to_jsonb(m)->>'merchantId')
-      FROM public.merchants m WHERE s.merchant_id::text = m.id::text;
+    UPDATE public.subscriptions s SET "subscriptionId" = s.subscription_code WHERE "subscriptionId" IS NULL;
+    DO $drop_subscription_camel$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='subscriptions' AND column_name='merchantId') THEN
+        UPDATE public.subscriptions s SET merchant_id = m.id
+          FROM public.merchants m
+          WHERE s.merchant_id IS NULL
+            AND (s."merchantId" = m.merchant_id OR s."merchantId" = m.merchant_code OR s."merchantId" = m.id::text);
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='subscriptions' AND column_name='startDate') THEN
+        UPDATE public.subscriptions SET start_date = COALESCE(start_date, "startDate") WHERE start_date IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='subscriptions' AND column_name='renewalDate') THEN
+        UPDATE public.subscriptions SET renewal_date = COALESCE(renewal_date, "renewalDate") WHERE renewal_date IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='subscriptions' AND column_name='trialEndDate') THEN
+        UPDATE public.subscriptions SET trial_end_date = COALESCE(trial_end_date, "trialEndDate") WHERE trial_end_date IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='subscriptions' AND column_name='createdAt') THEN
+        UPDATE public.subscriptions SET created_at = COALESCE(created_at, "createdAt") WHERE created_at IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='subscriptions' AND column_name='updatedAt') THEN
+        UPDATE public.subscriptions SET updated_at = COALESCE(updated_at, "updatedAt") WHERE updated_at IS NULL;
+      END IF;
+      ALTER TABLE public.subscriptions
+        DROP COLUMN IF EXISTS "merchantId",
+        DROP COLUMN IF EXISTS "startDate",
+        DROP COLUMN IF EXISTS "renewalDate",
+        DROP COLUMN IF EXISTS "trialEndDate",
+        DROP COLUMN IF EXISTS "createdAt",
+        DROP COLUMN IF EXISTS "updatedAt";
+    END;
+    $drop_subscription_camel$;
   `);
 
   await install('vendors', 'vendor_code', `
-    ALTER TABLE public.vendors ADD COLUMN IF NOT EXISTS "deletedAt" timestamptz;
-    ALTER TABLE public.vendors ADD COLUMN IF NOT EXISTS "vendorName" varchar(150);
-    ALTER TABLE public.vendors ADD COLUMN IF NOT EXISTS "vendorCode" varchar(50);
-    ALTER TABLE public.vendors ADD COLUMN IF NOT EXISTS "vendorType" varchar(50);
-    ALTER TABLE public.vendors ADD COLUMN IF NOT EXISTS "contactPerson" varchar(150);
-    ALTER TABLE public.vendors ADD COLUMN IF NOT EXISTS "productCategory" varchar(150);
-    UPDATE public.vendors SET
-      "vendorName" = vendor_name,
-      "vendorCode" = vendor_code,
-      "vendorType" = vendor_type::text,
-      "contactPerson" = contact_person,
-      "productCategory" = product_category,
-      "deletedAt" = CASE WHEN is_deleted THEN COALESCE("deletedAt", updated_at, now()) ELSE NULL END;
     CREATE OR REPLACE FUNCTION public.sync_vendors_legacy_cols() RETURNS trigger AS $fn$
-    DECLARE
-      legacy jsonb;
     BEGIN
-      legacy := to_jsonb(NEW);
-      NEW.vendor_code := COALESCE(NULLIF(NEW.vendor_code, ''), NULLIF(legacy->>'vendorCode', ''));
-      NEW.vendor_name := COALESCE(NULLIF(NEW.vendor_name, ''), NULLIF(legacy->>'vendorName', ''));
-      NEW.contact_person := COALESCE(NEW.contact_person, legacy->>'contactPerson');
-      NEW.product_category := COALESCE(NEW.product_category, legacy->>'productCategory');
-      NEW := jsonb_populate_record(NEW, jsonb_build_object(
-        'vendorCode', COALESCE(NULLIF(legacy->>'vendorCode', ''), NEW.vendor_code),
-        'vendorName', COALESCE(NULLIF(legacy->>'vendorName', ''), NEW.vendor_name),
-        'vendorType', COALESCE(NEW.vendor_type::text, legacy->>'vendorType'),
-        'contactPerson', COALESCE(legacy->>'contactPerson', NEW.contact_person),
-        'productCategory', COALESCE(legacy->>'productCategory', NEW.product_category),
-        'deletedAt', CASE WHEN NEW.is_deleted THEN COALESCE(legacy->>'deletedAt', now()::text) ELSE NULL END
-      ));
+      IF NEW.is_deleted AND NEW.deleted_at IS NULL THEN
+        NEW.deleted_at := now();
+      ELSIF NOT COALESCE(NEW.is_deleted, false) THEN
+        NEW.deleted_at := NULL;
+      END IF;
       RETURN NEW;
     END;
     $fn$ LANGUAGE plpgsql;
     DROP TRIGGER IF EXISTS vendors_legacy_cols ON public.vendors;
     CREATE TRIGGER vendors_legacy_cols BEFORE INSERT OR UPDATE ON public.vendors
       FOR EACH ROW EXECUTE PROCEDURE public.sync_vendors_legacy_cols();
+    DO $drop_vendor_camel$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='vendors' AND column_name='vendorName') THEN
+        UPDATE public.vendors SET vendor_name = COALESCE(NULLIF(vendor_name, ''), "vendorName") WHERE COALESCE("vendorName", '') <> '';
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='vendors' AND column_name='vendorType') THEN
+        UPDATE public.vendors SET vendor_type = "vendorType"::vendor_type
+          WHERE vendor_type IS NULL
+            AND "vendorType" IN (SELECT e::text FROM unnest(enum_range(NULL::vendor_type)) AS e);
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='vendors' AND column_name='contactPerson') THEN
+        UPDATE public.vendors SET contact_person = COALESCE(contact_person, "contactPerson") WHERE contact_person IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='vendors' AND column_name='productCategory') THEN
+        UPDATE public.vendors SET product_category = COALESCE(product_category, "productCategory") WHERE product_category IS NULL;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='vendors' AND column_name='deletedAt') THEN
+        UPDATE public.vendors SET deleted_at = COALESCE(deleted_at, "deletedAt") WHERE deleted_at IS NULL AND "deletedAt" IS NOT NULL;
+      END IF;
+      ALTER TABLE public.vendors
+        DROP COLUMN IF EXISTS "vendorName",
+        DROP COLUMN IF EXISTS "vendorType",
+        DROP COLUMN IF EXISTS "contactPerson",
+        DROP COLUMN IF EXISTS "productCategory",
+        DROP COLUMN IF EXISTS "deletedAt";
+    END;
+    $drop_vendor_camel$;
   `);
 
   await install('tendors', 'tendor_code', `
-    DROP TRIGGER IF EXISTS tendors_legacy_cols ON public.tendors;
-    ALTER TABLE public.tendors ADD COLUMN IF NOT EXISTS "deletedAt" timestamptz;
-    ALTER TABLE public.tendors ADD COLUMN IF NOT EXISTS "tendorName" varchar(150);
-    ALTER TABLE public.tendors ADD COLUMN IF NOT EXISTS "tendorCode" varchar(50);
-    UPDATE public.tendors SET
-      "tendorName" = tendor_name,
-      "tendorCode" = tendor_code,
-      "deletedAt" = CASE WHEN is_deleted THEN COALESCE("deletedAt", updated_at, now()) ELSE NULL END;
     CREATE OR REPLACE FUNCTION public.sync_tendors_legacy_cols() RETURNS trigger AS $fn$
     BEGIN
-      NEW.tendor_code := COALESCE(NULLIF(NEW.tendor_code, ''), NULLIF(NEW."tendorCode", ''));
-      NEW."tendorCode" := COALESCE(NULLIF(NEW."tendorCode", ''), NEW.tendor_code);
-      NEW.tendor_name := COALESCE(NULLIF(NEW.tendor_name, ''), NULLIF(NEW."tendorName", ''));
-      NEW."tendorName" := COALESCE(NULLIF(NEW."tendorName", ''), NEW.tendor_name);
-      NEW."deletedAt" := CASE WHEN NEW.is_deleted THEN COALESCE(NEW."deletedAt", now()) ELSE NULL END;
+      IF NEW.is_deleted AND NEW."deletedAt" IS NULL THEN
+        NEW."deletedAt" := now();
+      ELSIF NOT COALESCE(NEW.is_deleted, false) THEN
+        NEW."deletedAt" := NULL;
+      END IF;
       RETURN NEW;
     END;
     $fn$ LANGUAGE plpgsql;
     DROP TRIGGER IF EXISTS tendors_legacy_cols ON public.tendors;
     CREATE TRIGGER tendors_legacy_cols BEFORE INSERT OR UPDATE ON public.tendors
       FOR EACH ROW EXECUTE PROCEDURE public.sync_tendors_legacy_cols();
+    DO $drop_tendor_camel$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='tendors' AND column_name='tendorName') THEN
+        UPDATE public.tendors SET tendor_name = COALESCE(NULLIF(tendor_name, ''), "tendorName") WHERE COALESCE("tendorName", '') <> '';
+        ALTER TABLE public.tendors DROP COLUMN "tendorName";
+      END IF;
+    END;
+    $drop_tendor_camel$;
   `);
 
   await install('devices', 'device_code', `
-    ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "deviceCode" varchar(100);
-    ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "deviceName" varchar(255);
-    ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "deviceType" varchar(100);
-    ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "serialNumber" varchar(100);
-    ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "merchantName" varchar(255);
-    ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "merchantId" varchar(100);
-    ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "createdAt" timestamptz;
     ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS notes text;
     ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS device_id text;
     ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS authorization_code varchar(100);
@@ -974,34 +973,48 @@ async function ensureLegacyQueryColumns(dataSource: DataSource): Promise<void> {
     ALTER TABLE public.devices ALTER COLUMN serial_number DROP NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS devices_authorization_code_uidx ON public.devices (authorization_code) WHERE authorization_code IS NOT NULL AND authorization_code <> '';
     CREATE UNIQUE INDEX IF NOT EXISTS devices_device_active_code_uidx ON public.devices (device_active_code) WHERE device_active_code IS NOT NULL AND device_active_code <> '';
-    UPDATE public.devices SET
-      "deviceCode" = device_code,
-      "deviceName" = device_name,
-      "deviceType" = device_type,
-      "serialNumber" = serial_number,
-      "merchantName" = merchant_name,
-      "merchantId" = merchant_id::text,
-      "createdAt" = created_at;
     CREATE OR REPLACE FUNCTION public.sync_devices_legacy_cols() RETURNS trigger AS $fn$
     BEGIN
-      NEW.device_code := COALESCE(NULLIF(NEW.device_code, ''), NULLIF(NEW."deviceCode", ''));
-      NEW."deviceCode" := COALESCE(NULLIF(NEW."deviceCode", ''), NEW.device_code);
-      NEW.device_name := COALESCE(NULLIF(NEW.device_name, ''), NULLIF(NEW."deviceName", ''));
-      NEW."deviceName" := COALESCE(NULLIF(NEW."deviceName", ''), NEW.device_name);
-      NEW.device_type := COALESCE(NULLIF(NEW.device_type, ''), NULLIF(NEW."deviceType", ''));
-      NEW."deviceType" := COALESCE(NULLIF(NEW."deviceType", ''), NEW.device_type);
-      NEW.serial_number := COALESCE(NULLIF(NEW.serial_number, ''), NULLIF(NEW."serialNumber", ''));
-      NEW."serialNumber" := COALESCE(NULLIF(NEW."serialNumber", ''), NEW.serial_number);
-      NEW.merchant_name := COALESCE(NULLIF(NEW.merchant_name, ''), NULLIF(NEW."merchantName", ''));
-      NEW."merchantName" := COALESCE(NULLIF(NEW."merchantName", ''), NEW.merchant_name);
-      NEW."merchantId" := COALESCE(NEW.merchant_id::text, NEW."merchantId");
-      NEW."createdAt" := COALESCE(NEW."createdAt", NULLIF(NEW.created_at::text, '')::timestamptz, now());
       RETURN NEW;
     END;
     $fn$ LANGUAGE plpgsql;
     DROP TRIGGER IF EXISTS devices_legacy_cols ON public.devices;
     CREATE TRIGGER devices_legacy_cols BEFORE INSERT OR UPDATE ON public.devices
       FOR EACH ROW EXECUTE PROCEDURE public.sync_devices_legacy_cols();
+    DO $drop_device_camel$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='devices' AND column_name='deviceName') THEN
+        UPDATE public.devices SET device_name = COALESCE(NULLIF(device_name, ''), "deviceName") WHERE COALESCE("deviceName", '') <> '';
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='devices' AND column_name='deviceType') THEN
+        UPDATE public.devices SET device_type = COALESCE(NULLIF(device_type, ''), "deviceType") WHERE COALESCE("deviceType", '') <> '';
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='devices' AND column_name='serialNumber') THEN
+        UPDATE public.devices SET serial_number = COALESCE(NULLIF(serial_number, ''), "serialNumber") WHERE COALESCE("serialNumber", '') <> '';
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='devices' AND column_name='merchantName') THEN
+        UPDATE public.devices SET merchant_name = COALESCE(NULLIF(merchant_name, ''), "merchantName") WHERE COALESCE("merchantName", '') <> '';
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='devices' AND column_name='merchantId') THEN
+        IF (SELECT data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='devices' AND column_name='merchant_id') = 'uuid' THEN
+          UPDATE public.devices SET merchant_id = "merchantId"::uuid
+            WHERE merchant_id IS NULL AND "merchantId" ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+        ELSE
+          EXECUTE 'UPDATE public.devices SET merchant_id = COALESCE(NULLIF(merchant_id::text, ''''), "merchantId") WHERE COALESCE(merchant_id::text, '''') = '''' AND COALESCE("merchantId", '''') <> ''''';
+        END IF;
+      END IF;
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='devices' AND column_name='createdAt') THEN
+        UPDATE public.devices SET created_at = COALESCE(created_at, "createdAt") WHERE created_at IS NULL;
+      END IF;
+      ALTER TABLE public.devices
+        DROP COLUMN IF EXISTS "deviceName",
+        DROP COLUMN IF EXISTS "deviceType",
+        DROP COLUMN IF EXISTS "serialNumber",
+        DROP COLUMN IF EXISTS "merchantName",
+        DROP COLUMN IF EXISTS "merchantId",
+        DROP COLUMN IF EXISTS "createdAt";
+    END;
+    $drop_device_camel$;
   `);
 }
 

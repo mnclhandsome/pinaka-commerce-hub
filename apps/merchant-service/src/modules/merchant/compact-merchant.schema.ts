@@ -18,16 +18,16 @@ export async function ensureCompactMerchantSchema(db: DataSource): Promise<void>
       await runner.query(`
         CREATE TABLE IF NOT EXISTS public.merchants (
           id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-          "merchantId" varchar(100),
-          "merchantCode" varchar(100),
-          "businessName" varchar(255),
-          "createdDate" timestamptz DEFAULT now()
+          merchant_id varchar(100),
+          merchant_code varchar(100),
+          business_display_name varchar(255),
+          created_at timestamptz DEFAULT now()
         );
 
         ALTER TABLE public.merchants
           ADD COLUMN IF NOT EXISTS id uuid DEFAULT gen_random_uuid(),
-          ADD COLUMN IF NOT EXISTS "merchantId" varchar(100),
-          ADD COLUMN IF NOT EXISTS "merchantCode" varchar(100),
+          ADD COLUMN IF NOT EXISTS merchant_id varchar(100),
+          ADD COLUMN IF NOT EXISTS merchant_code varchar(100),
           ADD COLUMN IF NOT EXISTS "merchantName" varchar(255),
           ADD COLUMN IF NOT EXISTS "ownerName" varchar(255),
           ADD COLUMN IF NOT EXISTS name varchar(255),
@@ -35,17 +35,16 @@ export async function ensureCompactMerchantSchema(db: DataSource): Promise<void>
           ADD COLUMN IF NOT EXISTS email varchar(255),
           ADD COLUMN IF NOT EXISTS "merchantPhoneNumber" varchar(100),
           ADD COLUMN IF NOT EXISTS phone varchar(100),
-          ADD COLUMN IF NOT EXISTS "businessName" varchar(255),
-          ADD COLUMN IF NOT EXISTS "businessDisplayName" varchar(255),
+          ADD COLUMN IF NOT EXISTS business_display_name varchar(255),
           ADD COLUMN IF NOT EXISTS "legalBusinessName" varchar(255),
           ADD COLUMN IF NOT EXISTS "storeTypeId" uuid,
-          ADD COLUMN IF NOT EXISTS "addressLine1" text,
-          ADD COLUMN IF NOT EXISTS "addressLine2" text,
+          ADD COLUMN IF NOT EXISTS address_line1 text,
+          ADD COLUMN IF NOT EXISTS address_line2 text,
           ADD COLUMN IF NOT EXISTS "businessAddress" text,
           ADD COLUMN IF NOT EXISTS "city" varchar(100),
           ADD COLUMN IF NOT EXISTS "state" varchar(100),
           ADD COLUMN IF NOT EXISTS "pinCode" varchar(50),
-          ADD COLUMN IF NOT EXISTS "postalCode" varchar(50),
+          ADD COLUMN IF NOT EXISTS postal_code varchar(50),
           ADD COLUMN IF NOT EXISTS "country" varchar(100),
           ADD COLUMN IF NOT EXISTS "planId" uuid,
           ADD COLUMN IF NOT EXISTS "billingCycle" varchar(50) DEFAULT 'MONTHLY',
@@ -58,16 +57,13 @@ export async function ensureCompactMerchantSchema(db: DataSource): Promise<void>
           ADD COLUMN IF NOT EXISTS "paymentMethod" varchar(50) DEFAULT 'CARD',
           ADD COLUMN IF NOT EXISTS status varchar(50) DEFAULT 'ACTIVE',
           ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now(),
-          ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now(),
-          ADD COLUMN IF NOT EXISTS "createdDate" timestamptz DEFAULT now(),
-          ADD COLUMN IF NOT EXISTS "updatedDate" timestamptz DEFAULT now();
+          ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
 
         UPDATE public.merchants SET id = gen_random_uuid() WHERE id IS NULL;
-        UPDATE public.merchants SET "merchantCode" = COALESCE("merchantCode", "merchantId", 'MER-' || id::text) WHERE "merchantCode" IS NULL;
-        UPDATE public.merchants SET "merchantId" = COALESCE("merchantId", "merchantCode", 'MER-' || id::text) WHERE "merchantId" IS NULL;
+        UPDATE public.merchants SET merchant_code = COALESCE(merchant_code, merchant_id, 'MER-' || id::text) WHERE merchant_code IS NULL;
+        UPDATE public.merchants SET merchant_id = COALESCE(merchant_id, merchant_code, 'MER-' || id::text) WHERE merchant_id IS NULL;
         
         UPDATE public.merchants SET status = COALESCE(status, 'ACTIVE') WHERE status IS NULL;
-        ALTER TABLE public.merchants DROP COLUMN IF EXISTS merchant_code CASCADE;
       `);
 
       await runner.query(`
@@ -80,14 +76,12 @@ export async function ensureCompactMerchantSchema(db: DataSource): Promise<void>
         ALTER TABLE public.subscriptions
           ADD COLUMN IF NOT EXISTS id varchar(100),
           ADD COLUMN IF NOT EXISTS "subscriptionId" varchar(100) DEFAULT ('SUB-' || gen_random_uuid()::text),
-          ADD COLUMN IF NOT EXISTS "merchantId" varchar(100),
           ADD COLUMN IF NOT EXISTS merchant_id varchar(100),
           ADD COLUMN IF NOT EXISTS merchant_uuid uuid,
           ADD COLUMN IF NOT EXISTS subscription_code varchar(100),
           ADD COLUMN IF NOT EXISTS plan_id uuid,
           ADD COLUMN IF NOT EXISTS "planId" uuid,
           ADD COLUMN IF NOT EXISTS plan_code varchar(50) DEFAULT 'PRO',
-          ADD COLUMN IF NOT EXISTS "planCode" varchar(50) DEFAULT 'PRO',
           ADD COLUMN IF NOT EXISTS plan_name varchar(100) DEFAULT 'Pro Commerce Plan',
           ADD COLUMN IF NOT EXISTS "planName" varchar(100) DEFAULT 'Pro Commerce Plan',
           ADD COLUMN IF NOT EXISTS status varchar(50) DEFAULT 'ACTIVE',
@@ -103,14 +97,9 @@ export async function ensureCompactMerchantSchema(db: DataSource): Promise<void>
           ADD COLUMN IF NOT EXISTS current_period_start date DEFAULT CURRENT_DATE,
           ADD COLUMN IF NOT EXISTS current_period_end date DEFAULT (CURRENT_DATE + interval '30 days'),
           ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now(),
-          ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now(),
-          ADD COLUMN IF NOT EXISTS "createdAt" timestamptz DEFAULT now(),
-          ADD COLUMN IF NOT EXISTS "updatedAt" timestamptz DEFAULT now(),
-          ADD COLUMN IF NOT EXISTS "createdDate" timestamptz DEFAULT now(),
-          ADD COLUMN IF NOT EXISTS "updatedDate" timestamptz DEFAULT now();
+          ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT now();
 
         UPDATE public.subscriptions SET id = "subscriptionId" WHERE id IS NULL;
-        UPDATE public.subscriptions SET "merchantId" = merchant_id WHERE "merchantId" IS NULL AND merchant_id IS NOT NULL;
         UPDATE public.subscriptions SET "planId" = plan_id WHERE "planId" IS NULL AND plan_id IS NOT NULL;
         UPDATE public.subscriptions SET "billingCycle" = billing_cycle WHERE "billingCycle" IS NULL AND billing_cycle IS NOT NULL;
       `);

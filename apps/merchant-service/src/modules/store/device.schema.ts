@@ -9,8 +9,7 @@ export async function ensureDeviceSchema(db: DataSource): Promise<void> {
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         "merchantId" varchar(100) NOT NULL,
         "merchantName" varchar(255) NOT NULL DEFAULT '',
-        "deviceName" varchar(255) NOT NULL DEFAULT 'Unnamed device',
-        "deviceCode" varchar(100) NOT NULL,
+        "device_code" varchar(100) NOT NULL,
         "serialNumber" varchar(100) NOT NULL,
         "deviceType" varchar(100) NOT NULL DEFAULT 'Other',
         status varchar(20) NOT NULL DEFAULT 'Active',
@@ -18,14 +17,8 @@ export async function ensureDeviceSchema(db: DataSource): Promise<void> {
       )
     `);
 
-    await manager.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "merchantId" varchar(100)`);
-    await manager.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "merchantName" varchar(255)`);
-    await manager.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "deviceName" varchar(255)`);
-    await manager.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "deviceCode" varchar(100)`);
-    await manager.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "serialNumber" varchar(100)`);
-    await manager.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "deviceType" varchar(100)`);
+    await manager.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS device_code varchar(100)`);
     await manager.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS status varchar(20) DEFAULT 'Active'`);
-    await manager.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "createdAt" timestamp DEFAULT now()`);
     await manager.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS "storeId" varchar(100)`);
     await manager.query(`ALTER TABLE public.devices ADD COLUMN IF NOT EXISTS details jsonb DEFAULT '{}'::jsonb`);
 
@@ -53,18 +46,18 @@ export async function ensureDeviceSchema(db: DataSource): Promise<void> {
     await manager.query(`
       UPDATE public.devices SET
         "deviceName" = COALESCE(NULLIF(BTRIM("deviceName"), ''), NULLIF(details->>'deviceName', ''), NULLIF(details->>'name', ''), 'Unnamed device'),
-        "deviceCode" = COALESCE(NULLIF(BTRIM("deviceCode"), ''), NULLIF(details->>'deviceCode', ''), NULLIF(details->>'code', ''), 'DEV-' || REPLACE(id::text, '-', '')),
+        device_code = COALESCE(NULLIF(BTRIM(device_code), ''), NULLIF(details->>'deviceCode', ''), NULLIF(details->>'code', ''), 'DEV-' || REPLACE(id::text, '-', '')),
         "deviceType" = COALESCE(NULLIF(BTRIM("deviceType"), ''), NULLIF(details->>'deviceType', ''), NULLIF(details->>'type', ''), 'Other'),
         "merchantName" = COALESCE(NULLIF(BTRIM("merchantName"), ''), NULLIF(details->>'merchantName', ''), "merchantId"),
         status = COALESCE(NULLIF(BTRIM(status), ''), NULLIF(details->>'status', ''), 'Active')
-      WHERE "deviceName" IS NULL OR "deviceCode" IS NULL OR "deviceType" IS NULL OR "merchantName" IS NULL OR status IS NULL
-         OR BTRIM(COALESCE("deviceName", '')) = '' OR BTRIM(COALESCE("deviceCode", '')) = ''
+      WHERE "deviceName" IS NULL OR device_code IS NULL OR "deviceType" IS NULL OR "merchantName" IS NULL OR status IS NULL
+         OR BTRIM(COALESCE("deviceName", '')) = '' OR BTRIM(COALESCE(device_code, '')) = ''
     `);
 
     await manager.query(`UPDATE public.devices SET "deviceName" = COALESCE(NULLIF(BTRIM("deviceName"), ''), 'Unnamed device') WHERE "deviceName" IS NULL OR BTRIM("deviceName") = ''`);
     await manager.query(`ALTER TABLE public.devices ALTER COLUMN "deviceName" SET NOT NULL`);
-    await manager.query(`UPDATE public.devices SET "deviceCode" = COALESCE(NULLIF(BTRIM("deviceCode"), ''), 'DEV-' || REPLACE(id::text, '-', '')) WHERE "deviceCode" IS NULL OR BTRIM("deviceCode") = ''`);
-    await manager.query(`ALTER TABLE public.devices ALTER COLUMN "deviceCode" SET NOT NULL`);
+    await manager.query(`UPDATE public.devices SET device_code = COALESCE(NULLIF(BTRIM(device_code), ''), 'DEV-' || REPLACE(id::text, '-', '')) WHERE device_code IS NULL OR BTRIM(device_code) = ''`);
+    await manager.query(`ALTER TABLE public.devices ALTER COLUMN device_code SET NOT NULL`);
     await manager.query(`UPDATE public.devices SET "deviceType" = COALESCE(NULLIF(BTRIM("deviceType"), ''), 'Other') WHERE "deviceType" IS NULL OR BTRIM("deviceType") = ''`);
     await manager.query(`ALTER TABLE public.devices ALTER COLUMN "deviceType" SET NOT NULL`);
     await manager.query(`UPDATE public.devices SET "merchantName" = COALESCE(NULLIF(BTRIM("merchantName"), ''), "merchantId") WHERE "merchantName" IS NULL OR BTRIM("merchantName") = ''`);
@@ -76,7 +69,7 @@ export async function ensureDeviceSchema(db: DataSource): Promise<void> {
     await manager.query(`ALTER TABLE public.devices ALTER COLUMN "merchantId" SET NOT NULL`);
     await manager.query(`ALTER TABLE public.devices ALTER COLUMN "serialNumber" SET NOT NULL`);
 
-    await manager.query(`CREATE UNIQUE INDEX IF NOT EXISTS devices_device_code_uq ON public.devices ("deviceCode")`);
+    await manager.query(`CREATE UNIQUE INDEX IF NOT EXISTS devices_device_code_uq ON public.devices (device_code)`);
     await manager.query(`CREATE UNIQUE INDEX IF NOT EXISTS devices_serial_number_uq ON public.devices ("serialNumber")`);
     await manager.query(`CREATE INDEX IF NOT EXISTS devices_merchant_id_idx ON public.devices ("merchantId")`);
   });

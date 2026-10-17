@@ -51,7 +51,7 @@ export class MerchantResponseRelations {
             CROSS JOIN LATERAL (
               SELECT mer.*
               FROM public.merchants mer
-              WHERE mer."merchantId"=requested.ref OR mer.id::text=requested.ref OR mer."merchantCode"=requested.ref
+              WHERE mer.merchant_id=requested.ref OR mer.id::text=requested.ref OR mer.merchant_code=requested.ref
               ORDER BY CASE WHEN COALESCE(mer.status,'ACTIVE')='ACTIVE' THEN 0 ELSE 1 END,
                 COALESCE(mer."createdDate", now()) DESC
               LIMIT 1

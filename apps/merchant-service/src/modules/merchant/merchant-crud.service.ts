@@ -6,7 +6,20 @@ type Input = Record<string, any>;
 const merchantFields = ['merchantId','ownerName','email','phone','businessName','legalBusinessName','businessType','retailSubCategory','firstName','lastName','alternatePhone','jobTitle','billingContact','taxId','country','state','city','postalCode','businessAddress','status',
   'merchantName','businessDisplayName','addressLine1','addressLine2','planId','billingCycle','startDate','renewalDate','agreementPrice','tax','totalDueToday','paymentMethod','roleIds'];
 const subscriptionFields = ['planId','billingCycle','startDate','renewalDate','price','status'];
-const quote = (key: string) => `"${key}"`;
+const snakeColumns: Record<string, string> = {
+  merchantId: 'merchant_id',
+  businessName: 'business_display_name',
+  businessDisplayName: 'business_display_name',
+  addressLine1: 'address_line1',
+  addressLine2: 'address_line2',
+  postalCode: 'postal_code',
+  firstName: 'first_name',
+  lastName: 'last_name',
+  createdAt: 'created_at',
+  updatedAt: 'updated_at',
+  createdDate: 'created_at',
+};
+const quote = (key: string) => `"${snakeColumns[key] ?? key}"`;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const licenseCount = (value: unknown, fallback = 0): number => {
@@ -107,15 +120,15 @@ export class MerchantCrudService {
   }
 
   private async identity(manager: Pick<EntityManager,'query'>, code: string): Promise<string> {
-    const [row] = await manager.query(`SELECT "merchantId" AS code FROM public.merchants
-      WHERE "merchantId"=$1 OR "merchantCode"=$1 OR id::text=$1 LIMIT 1`,[code]);
+    const [row] = await manager.query(`SELECT merchant_id AS code FROM public.merchants
+      WHERE merchant_id=$1 OR merchant_code=$1 OR id::text=$1 LIMIT 1`,[code]);
     if (!row) throw new NotFoundException('Merchant not found');
     return row.code;
   }
 
   private async anchor(manager: Pick<EntityManager,'query'>, merchantId: string) {
-    const [row] = await manager.query(`SELECT m.id,m."merchantCode" FROM public.merchants m
-      WHERE m."merchantId"=$1 ORDER BY m."createdAt" ASC NULLS LAST,m.id LIMIT 1`,[merchantId]);
+    const [row] = await manager.query(`SELECT m.id, m.merchant_code AS "merchantCode" FROM public.merchants m
+      WHERE m.merchant_id=$1 ORDER BY m.created_at ASC NULLS LAST,m.id LIMIT 1`,[merchantId]);
     if (!row) throw new NotFoundException('Merchant not found');
     return row;
   }
@@ -126,9 +139,8 @@ export class MerchantCrudService {
     await manager.query("SELECT pg_advisory_xact_lock(hashtextextended('merchant:' || $1,0))",[root]);
     const anchor = await this.anchor(manager,root);
     await manager.query('SELECT 1 FROM public.merchants WHERE id=$1 FOR UPDATE',[anchor.id]);
-    const [merchant] = await manager.query(`SELECT m.*,to_char(m."startDate",'YYYY-MM-DD') AS "startDate",
-      to_char(m."renewalDate",'YYYY-MM-DD') AS "renewalDate" FROM public.merchants m
-      WHERE m."merchantId"=$1 ORDER BY m."createdAt" DESC NULLS LAST, m.id DESC LIMIT 1 FOR UPDATE`,[root]);
+    const [merchant] = await manager.query(`SELECT m.* FROM public.merchants m
+      WHERE m.merchant_id=$1 ORDER BY m.created_at DESC NULLS LAST, m.id DESC LIMIT 1 FOR UPDATE`,[root]);
     if (!merchant) throw new NotFoundException('Merchant not found');
     return {merchant,root};
   }
@@ -180,14 +192,15 @@ export class MerchantCrudService {
 
   private async saveMerchantRecord(manager: EntityManager, root: string, current: Input, changes: Input, version: boolean) {
     if (version) {
-      await manager.query(`UPDATE public.merchants SET status='INACTIVE',"updatedAt"=clock_timestamp() WHERE "merchantCode"=$1`,[current.merchantCode]);
-      const next = {...current,...changes,status:'ACTIVE',merchantCode:`MRC-${randomUUID()}`};
+      await manager.query(`UPDATE public.merchants SET status='INACTIVE',updated_at=clock_timestamp() WHERE merchant_code=$1`,[current.merchant_code ?? current.merchantCode]);
+      const next = {...current,...changes,status:'ACTIVE',merchant_code:`MRC-${randomUUID()}`};
+      delete next.merchantCode;
       const keys=Object.keys(next).filter(key=>!['id','createdAt','updatedAt'].includes(key));
       await manager.query(`INSERT INTO public.merchants (${keys.map(quote).join(',')}) VALUES (${keys.map((_,i)=>`$${i+1}`).join(',')})`,this.values(next,keys));
       await this.anchor(manager,root);
     } else {
       const keys=merchantFields.filter(key=>changes[key]!==undefined);
-      if (keys.length) await manager.query(`UPDATE public.merchants SET ${keys.map((key,i)=>`${quote(key)}=$${i+2}`).join(',')},"updatedAt"=clock_timestamp() WHERE "merchantCode"=$1`,[current.merchantCode,...this.values(changes,keys)]);
+      if (keys.length) await manager.query(`UPDATE public.merchants SET ${keys.map((key,i)=>`${quote(key)}=$${i+2}`).join(',')},updated_at=clock_timestamp() WHERE merchant_code=$1`,[current.merchant_code ?? current.merchantCode,...this.values(changes,keys)]);
     }
   }
 
@@ -262,11 +275,11 @@ export class MerchantCrudService {
     input.merchantId ??= `MER-${randomUUID()}`;
     await this.transaction(async manager => {
       await manager.query("SELECT pg_advisory_xact_lock(hashtextextended('merchant:' || $1,0))",[input.merchantId]);
-      if ((await manager.query('SELECT 1 FROM public.merchants WHERE "merchantId"=$1 OR "merchantCode"=$1',[input.merchantId])).length) throw new ConflictException('merchantId already exists');
+      if ((await manager.query('SELECT 1 FROM public.merchants WHERE merchant_id=$1 OR merchant_code=$1',[input.merchantId])).length) throw new ConflictException('merchantId already exists');
       const fields = merchantFields.filter(key=>input[key] !== undefined);
-      const [merchant] = await manager.query(`INSERT INTO public.merchants ("merchantCode",${fields.map(quote).join(',')})
+      const [merchant] = await manager.query(`INSERT INTO public.merchants (merchant_code,${fields.map(quote).join(',')})
         VALUES ($1,${fields.map((_,i)=>`$${i+2}`).join(',')}) RETURNING *`,[code,...this.values(input,fields)]);
-      if (input.status === undefined) await manager.query(`UPDATE public.merchants SET status='ACTIVE' WHERE "merchantCode"=$1`,[code]);
+      if (input.status === undefined) await manager.query(`UPDATE public.merchants SET status='ACTIVE' WHERE merchant_code=$1`,[code]);
       const sub = await this.writeSubscription(manager,merchant.id,{...input,price:input.agreementPrice,status:'ACTIVE'});
       await this.saveMerchantRecord(manager,input.merchantId,merchant,this.subscriptionSnapshot(await this.subscriptionRow(manager,sub)),false);
       await this.extras(manager,input.merchantId,input);
@@ -277,16 +290,15 @@ export class MerchantCrudService {
 
   async getMerchant(code: string) {
     const root = await this.identity(this.db,code);
-    const [merchant] = await this.db.query(`SELECT m.*,to_char(m."startDate",'YYYY-MM-DD') AS "startDate",
-      to_char(m."renewalDate",'YYYY-MM-DD') AS "renewalDate" FROM public.merchants m
-      WHERE m."merchantId"=$1 ORDER BY m."createdAt" DESC NULLS LAST, m.id DESC LIMIT 1`,[root]);
+    const [merchant] = await this.db.query(`SELECT m.* FROM public.merchants m
+      WHERE m.merchant_id=$1 ORDER BY m.created_at DESC NULLS LAST, m.id DESC LIMIT 1`,[root]);
     if (!merchant) throw new NotFoundException('Merchant not found');
     const subscriptions = await this.listSubscriptions(root);
     return {success:true,merchantId:root,merchant,subscription:subscriptions.subscriptions.find((sub: Input)=>sub.status==='ACTIVE') || null};
   }
 
   async listMerchants() {
-    const codes = await this.db.query('SELECT DISTINCT "merchantId" FROM public.merchants');
+    const codes = await this.db.query('SELECT DISTINCT merchant_id AS "merchantId" FROM public.merchants');
     const merchants = await Promise.all(codes.map((row: Input)=>this.getMerchant(row.merchantId)));
     return {success:true,count:merchants.length,merchants:merchants.map(({success,...row})=>row)};
   }
@@ -320,7 +332,7 @@ export class MerchantCrudService {
     const current = await this.getMerchant(code);
     const history = await this.db.query('SELECT * FROM public.onboarding_audit_logs WHERE "merchantId"=$1 ORDER BY "createdAt" DESC',[current.merchantId]);
     const merchants = await this.db.query(`SELECT m.* FROM public.merchants m
-      WHERE m."merchantId"=$1 ORDER BY m."createdAt" DESC NULLS LAST, m.id DESC`,[current.merchantId]);
+      WHERE m.merchant_id=$1 ORDER BY m.created_at DESC NULLS LAST, m.id DESC`,[current.merchantId]);
     return {...current,merchants,history,...await this.listSubscriptions(current.merchantId)};
   }
 
@@ -328,12 +340,12 @@ export class MerchantCrudService {
     await this.transaction(async manager=>{
       const {root} = await this.lockMerchant(manager,code);
       // Refuse deletion while related business records remain, including tables without FKs.
-      if ((await manager.query(`SELECT 1 FROM public.subscriptions WHERE merchant_id=(SELECT id FROM public.merchants WHERE "merchantId"=$1 LIMIT 1) LIMIT 1`,[root])).length) {
+      if ((await manager.query(`SELECT 1 FROM public.subscriptions WHERE merchant_id=(SELECT id FROM public.merchants WHERE merchant_id=$1 LIMIT 1) LIMIT 1`,[root])).length) {
         throw new ConflictException('Merchant has subscriptions; remove them first');
       }
       if ((await manager.query(`SELECT 1 FROM public.stores WHERE "merchantId"=$1 OR "merchantId" IN
-        (SELECT "merchantCode" FROM public.merchants WHERE "merchantId"=$1) LIMIT 1`,[root])).length) throw new ConflictException('Merchant has stores; remove them first');
-      await manager.query('DELETE FROM public.merchants WHERE "merchantId"=$1',[root]);
+        (SELECT merchant_code FROM public.merchants WHERE merchant_id=$1) LIMIT 1`,[root])).length) throw new ConflictException('Merchant has stores; remove them first');
+      await manager.query('DELETE FROM public.merchants WHERE merchant_id=$1',[root]);
     });
     return {success:true,merchantId:code};
   }

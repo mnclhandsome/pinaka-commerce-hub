@@ -73,7 +73,7 @@ export class PosEmployeeAttendanceRepository {
          AND e.status::text = 'ACTIVE'
          AND m.status = 'ACTIVE'
          AND s.status = 'ACTIVE'
-         AND (m.id::text = $2 OR m."merchantId" = $2 OR m."merchantCode" = $2)
+         AND (m.id::text = $2 OR m.merchant_id = $2 OR m.merchant_code = $2)
          AND (s.id::text = $3 OR s.store_code = $3 OR lower(s.store_name) = lower($3))
        LIMIT 1`,
       [employeeCode.trim(), merchantIdentifier.trim(), storeIdentifier.trim()],

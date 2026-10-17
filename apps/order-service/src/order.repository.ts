@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, OnModuleInit, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { DataSource, In, QueryFailedError, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, QueryFailedError, Repository } from 'typeorm';
 import Redis from 'ioredis';
 import { postgresConnectionOptions } from '@pinaka-delivery-hub/database';
 import { OrderEntity, OrderType, PaymentMethod, PaymentStatus, OrderStatus } from './entities/order.entity';
@@ -18,10 +18,9 @@ import {
 @Injectable()
 export class OrderRepository implements OnModuleInit {
   private dataSource?: DataSource;
-  private orderRepo?: Repository<OrderEntity>;
+  private storeOrderRepo?: Repository<StoreOrderEntity>;
   private itemRepo?: Repository<OrderItemEntity>;
   private historyRepo?: Repository<OrderStatusHistoryEntity>;
-  private storeOrderRepo?: Repository<StoreOrderEntity>;
   private redisClient?: Redis;
   private isDbConnected = false;
   private isRedisConnected = false;
@@ -35,7 +34,7 @@ export class OrderRepository implements OnModuleInit {
       await this.migrateLegacyOrderIdsBeforeOrm();
       await this.migrateOrderColumnsToSnakeCase();
       this.dataSource = new DataSource({
-        ...postgresConnectionOptions([OrderEntity, OrderItemEntity, OrderStatusHistoryEntity, StoreOrderEntity]),
+        ...postgresConnectionOptions([StoreOrderEntity, OrderItemEntity, OrderStatusHistoryEntity]),
         synchronize: false,
       });
       await this.dataSource.initialize();
@@ -43,10 +42,9 @@ export class OrderRepository implements OnModuleInit {
       await this.ensurePosOrderColumns();
       await this.ensureStoreOrdersTable();
       await ensureStorePosPaymentsSchema(this.dataSource);
-      this.orderRepo = this.dataSource.getRepository(OrderEntity);
+      this.storeOrderRepo = this.dataSource.getRepository(StoreOrderEntity);
       this.itemRepo = this.dataSource.getRepository(OrderItemEntity);
       this.historyRepo = this.dataSource.getRepository(OrderStatusHistoryEntity);
-      this.storeOrderRepo = this.dataSource.getRepository(StoreOrderEntity);
       this.isDbConnected = true;
     } catch (err: any) {
       console.log(`⚠️ [Order Service DB] Offline (${err.message}). Using in-memory store fallback.`);
@@ -99,7 +97,7 @@ export class OrderRepository implements OnModuleInit {
   }
 
   async createOrder(orderData: any): Promise<{ order: OrderEntity; items: OrderItemEntity[]; storeOrder: StoreOrderEntity | null; duplicate: boolean }> {
-    if (!this.isDbConnected || !this.dataSource || !this.orderRepo || !this.itemRepo) {
+    if (!this.isDbConnected || !this.dataSource || !this.storeOrderRepo) {
       throw new ServiceUnavailableException('Order database is unavailable; the order was not saved');
     }
     const sourcePayload = JSON.parse(JSON.stringify(orderData.requestPayload || {}));
@@ -177,28 +175,36 @@ export class OrderRepository implements OnModuleInit {
     };
 
     const storeOrder = this.buildStoreOrder(id, orderData, sourcePayload);
-    if (this.isDbConnected && this.orderRepo && this.itemRepo && this.dataSource) {
-      let savedOrder: OrderEntity;
+    storeOrder.orderNumber = order.orderNumber;
+    storeOrder.customerName = order.customerName;
+    storeOrder.customerPhone = order.customerPhone;
+    storeOrder.orderType = order.orderType;
+    storeOrder.paymentMethodCode = order.paymentMethod;
+    storeOrder.paymentStatus = order.paymentStatus;
+    storeOrder.tipAmount = order.tipAmount;
+    storeOrder.offline = order.offline;
+    storeOrder.localShiftId = order.localShiftId;
+    storeOrder.metadata = order.metadata;
+    storeOrder.requestPayload = order.requestPayload;
+    storeOrder.orderStatus = order.orderStatus;
+    storeOrder.statusHistory = [{
+      id: `HST-${Date.now()}`,
+      orderId: id,
+      fromStatus: 'NONE',
+      toStatus: order.orderStatus,
+      changedBy: 'POS System',
+      reason: 'Initial Order Creation',
+      createdAt: new Date(),
+    }];
+    if (this.isDbConnected && this.storeOrderRepo && this.dataSource) {
       let savedStoreOrder: StoreOrderEntity;
       try {
         const saved = await this.dataSource.transaction(async manager => {
-          const orderRepository = manager.getRepository(OrderEntity);
-          const itemRepository = manager.getRepository(OrderItemEntity);
-          const historyRepository = manager.getRepository(OrderStatusHistoryEntity);
           const storeOrderRepository = manager.getRepository(StoreOrderEntity);
           const paymentRows = this.buildStorePosPaymentRows(id, order, orderData, sourcePayload, storeOrder);
-          const persistedOrder = await orderRepository.save(orderRepository.create(order));
-          await itemRepository.save(items.map(item => itemRepository.create(item)));
-          await historyRepository.save(historyRepository.create({
-            id: `HST-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-            orderId: id,
-            fromStatus: 'NONE',
-            toStatus: order.orderStatus,
-            changedBy: 'POS System',
-            reason: 'Initial Order Creation',
-            createdAt: new Date(),
-          }));
           const persistedStoreOrder = await storeOrderRepository.save(storeOrderRepository.create(storeOrder));
+          await this.saveLineItems(manager, id, items, true);
+          await this.saveStatusHistory(manager, storeOrder.statusHistory[0] as OrderStatusHistoryEntity);
           if (paymentRows.length) {
             await manager.query(
               `INSERT INTO public.store_pos_payments (
@@ -216,9 +222,8 @@ export class OrderRepository implements OnModuleInit {
               paymentRows.flat(),
             );
           }
-          return { persistedOrder, persistedStoreOrder };
+          return { persistedStoreOrder };
         });
-        savedOrder = saved.persistedOrder;
         savedStoreOrder = saved.persistedStoreOrder;
       } catch (error: unknown) {
         if (error instanceof QueryFailedError && (error as any).driverError?.code === '22P02') {
@@ -231,13 +236,22 @@ export class OrderRepository implements OnModuleInit {
         }
         throw error;
       }
+      const savedOrder = this.projectOrder(savedStoreOrder);
       await this.cacheOrder(savedOrder);
       console.log(`🛍️ [Order Created] Order ${savedOrder.orderNumber} ($${savedOrder.totalAmount}) created for Store ${savedOrder.storeId}`);
       return { order: savedOrder, items, storeOrder: savedStoreOrder, duplicate: false };
     } else {
       this.inMemoryOrders.unshift(order);
       this.inMemoryItems.push(...items);
-      await this.recordStatusChange(id, 'NONE', order.orderStatus, 'POS System', 'Initial Order Creation');
+      this.inMemoryHistory.push({
+        id: `HST-${Date.now()}`,
+        orderId: id,
+        fromStatus: 'NONE',
+        toStatus: order.orderStatus,
+        changedBy: 'POS System',
+        reason: 'Initial Order Creation',
+        createdAt: new Date(),
+      });
       await this.cacheOrder(order);
       console.log(`🛍️ [Order Created (InMemory)] Order ${order.orderNumber} ($${order.totalAmount}) created for Store ${order.storeId}`);
       return { order, items, storeOrder, duplicate: false };
@@ -245,8 +259,8 @@ export class OrderRepository implements OnModuleInit {
   }
 
   private async rejectDuplicateClientOrder(storeId: string, clientOrderId: string): Promise<void> {
-    const existing = this.isDbConnected && this.orderRepo
-      ? await this.orderRepo.findOne({ where: { storeId, clientOrderId } })
+    const existing = this.isDbConnected && this.storeOrderRepo
+      ? await this.storeOrderRepo.findOne({ where: { storeId, clientOrderId } })
       : this.inMemoryOrders.find(order => order.storeId === storeId && order.clientOrderId === clientOrderId);
     if (existing) {
       throw new ConflictException(`An order with client order ID '${clientOrderId}' already exists`);
@@ -279,6 +293,19 @@ export class OrderRepository implements OnModuleInit {
       orderId,
       merchantId: orderData.merchantId,
       storeId: orderData.storeId,
+      orderNumber: '',
+      customerName: orderData.customerName || 'Walk-in Customer',
+      customerPhone: orderData.customerPhone || undefined,
+      orderType: orderData.orderType || 'IN_STORE_POS',
+      paymentMethodCode: orderData.paymentMethod,
+      paymentStatus: orderData.paymentStatus || 'PAID',
+      tipAmount: Number(orderData.tipAmount || 0),
+      offline: Boolean(orderData.offline),
+      localShiftId: orderData.localShiftId,
+      metadata: Array.isArray(orderData.metadata) ? orderData.metadata : metadata,
+      requestPayload: orderData.requestPayload,
+      orderStatus: orderData.orderStatus || 'CREATED',
+      statusHistory: [],
       clientOrderId: metaText('_pos_client_order_id') || orderData.clientOrderId || undefined,
       deviceId: metaText('pos_device_id'),
       placedBy: metaText('pos_placed_by'),
@@ -615,11 +642,6 @@ export class OrderRepository implements OnModuleInit {
     orderData.requestPayload = sourcePayload;
   }
 
-  private async findStoreOrder(orderId: string): Promise<StoreOrderEntity | null> {
-    if (!this.storeOrderRepo) return null;
-    return this.storeOrderRepo.findOne({ where: { orderId } });
-  }
-
   private async cashbackFeeForAmount(storeId: string, amount: number): Promise<number> {
     if (!this.dataSource || amount <= 0) return 0;
     try {
@@ -835,10 +857,13 @@ export class OrderRepository implements OnModuleInit {
       CREATE INDEX IF NOT EXISTS store_orders_order_id_idx
       ON public.store_orders (order_id)
     `);
+    await this.consolidateDuplicateTables();
   }
 
   private async ensurePosOrderColumns(): Promise<void> {
     if (!this.dataSource) return;
+    const table = await this.dataSource.query(`SELECT to_regclass('public.orders') AS orders_table`);
+    if (!table[0]?.orders_table) return;
     await this.dataSource.query(`
       ALTER TABLE public.orders
         ADD COLUMN IF NOT EXISTS local_shift_id varchar(100),
@@ -881,6 +906,7 @@ export class OrderRepository implements OnModuleInit {
          AND ((table_name = 'orders' AND column_name = 'id')
            OR (table_name IN ('order_line_items', 'order_status_history') AND column_name = 'order_id'))`,
     );
+    if (!columns.some((column: { table_name: string }) => column.table_name === 'orders')) return;
     if (columns.length && columns.every((column: { data_type: string }) => column.data_type === 'uuid')) {
       return;
     }
@@ -933,30 +959,35 @@ export class OrderRepository implements OnModuleInit {
   }
 
   async updateOrderStatus(orderId: string, toStatus: OrderStatus, changedBy: string, reason?: string): Promise<OrderEntity | null> {
-    let order: OrderEntity | null = null;
-
-    if (this.isDbConnected && this.orderRepo) {
-      order = await this.orderRepo.findOne({ where: { id: orderId } });
-      if (order) {
-        const fromStatus = order.orderStatus;
-        order.orderStatus = toStatus;
-        order = await this.orderRepo.save(order);
-        await this.recordStatusChange(orderId, fromStatus, toStatus, changedBy, reason);
-      }
-    } else {
-      order = this.inMemoryOrders.find(o => o.id === orderId) || null;
-      if (order) {
-        const fromStatus = order.orderStatus;
-        order.orderStatus = toStatus;
-        await this.recordStatusChange(orderId, fromStatus, toStatus, changedBy, reason);
-      }
-    }
-
-    if (order) {
+    if (this.isDbConnected && this.storeOrderRepo) {
+      const storeOrder = await this.storeOrderRepo.findOne({ where: { orderId } });
+      if (!storeOrder) return null;
+      const fromStatus = storeOrder.orderStatus;
+      storeOrder.orderStatus = toStatus;
+      storeOrder.status = toStatus === OrderStatus.CANCELLED ? 'cancelled'
+        : toStatus === OrderStatus.COMPLETED ? 'completed'
+          : storeOrder.status;
+      storeOrder.updatedAt = new Date();
+      storeOrder.statusHistory = [...(Array.isArray(storeOrder.statusHistory) ? storeOrder.statusHistory : []), {
+        id: `HST-${randomUUID()}`,
+        orderId,
+        fromStatus,
+        toStatus,
+        changedBy: changedBy || 'POS System',
+        reason: reason || 'State Machine Transition',
+        createdAt: new Date(),
+      }];
+      const saved = await this.storeOrderRepo.save(storeOrder);
+      const history = storeOrder.statusHistory[storeOrder.statusHistory.length - 1] as OrderStatusHistoryEntity;
+      if (this.historyRepo) await this.historyRepo.save(this.historyRepo.create(history));
+      const order = this.projectOrder(saved);
       await this.cacheOrder(order);
-      console.log(`🔄 [Order State Machine] Order #${orderId} transition: ${order.orderStatus} (by ${changedBy})`);
+      return order;
     }
-
+    const order = this.inMemoryOrders.find(entry => entry.id === orderId) || null;
+    if (!order) return null;
+    order.orderStatus = toStatus;
+    await this.cacheOrder(order);
     return order;
   }
 
@@ -967,40 +998,42 @@ export class OrderRepository implements OnModuleInit {
     replaceItems: boolean;
     history?: { fromStatus: string; toStatus: string; changedBy: string; reason?: string };
   }): Promise<{ order: OrderEntity; items: OrderItemEntity[]; storeOrder: StoreOrderEntity | null }> {
-    if (!this.isDbConnected || !this.dataSource) {
+    if (!this.isDbConnected || !this.dataSource || !input.storeOrder) {
       throw new ServiceUnavailableException('Order database is unavailable; the order was not updated');
     }
+    const storeOrder = input.storeOrder;
+    storeOrder.orderStatus = input.order.orderStatus;
+    storeOrder.subtotal = input.order.subtotal;
+    storeOrder.discountTotal = input.order.discountAmount;
+    storeOrder.taxTotal = input.order.taxAmount;
+    storeOrder.tipAmount = input.order.tipAmount;
+    storeOrder.total = input.order.totalAmount;
+    storeOrder.paymentStatus = input.order.paymentStatus;
+    storeOrder.updatedAt = new Date();
+    if (input.history) {
+      storeOrder.statusHistory = [...(Array.isArray(storeOrder.statusHistory) ? storeOrder.statusHistory : []), {
+        id: `HST-${randomUUID()}`,
+        orderId: input.order.id,
+        fromStatus: input.history.fromStatus,
+        toStatus: input.history.toStatus,
+        changedBy: input.history.changedBy || 'POS System',
+        reason: input.history.reason || 'Order update',
+        createdAt: new Date(),
+      }];
+    }
     const saved = await this.dataSource.transaction(async manager => {
-      const orderRepository = manager.getRepository(OrderEntity);
-      const itemRepository = manager.getRepository(OrderItemEntity);
-      const historyRepository = manager.getRepository(OrderStatusHistoryEntity);
       const storeOrderRepository = manager.getRepository(StoreOrderEntity);
-      const persistedOrder = await orderRepository.save(orderRepository.create({ ...input.order }));
-      let persistedItems = input.items;
-      if (input.replaceItems) {
-        await itemRepository.delete({ orderId: input.order.id });
-        persistedItems = input.items.length
-          ? await itemRepository.save(input.items.map(item => itemRepository.create(item)))
-          : [];
-      }
-      const persistedStoreOrder = input.storeOrder
-        ? await storeOrderRepository.save(storeOrderRepository.create({ ...input.storeOrder }))
-        : null;
+      const persisted = await storeOrderRepository.save(storeOrderRepository.create({ ...storeOrder }));
+      if (input.replaceItems) await this.saveLineItems(manager, input.order.id, input.items, true);
       if (input.history) {
-        await historyRepository.save(historyRepository.create({
-          id: `HST-${randomUUID()}`,
-          orderId: input.order.id,
-          fromStatus: input.history.fromStatus,
-          toStatus: input.history.toStatus,
-          changedBy: input.history.changedBy || 'POS System',
-          reason: input.history.reason || 'Order update',
-          createdAt: new Date(),
-        }));
+        const history = storeOrder.statusHistory[storeOrder.statusHistory.length - 1] as OrderStatusHistoryEntity;
+        await this.saveStatusHistory(manager, history);
       }
-      return { order: persistedOrder, items: persistedItems, storeOrder: persistedStoreOrder };
+      return persisted;
     });
-    await this.cacheOrder(saved.order);
-    return saved;
+    const order = this.projectOrder(saved);
+    await this.cacheOrder(order);
+    return { order, items: this.itemsFromStore(saved), storeOrder: saved };
   }
 
   async listOrders(criteria: {
@@ -1024,7 +1057,7 @@ export class OrderRepository implements OnModuleInit {
       refunds: Array<{ amount: unknown; metadata: Record<string, unknown> | null }>;
     }>;
   }> {
-    if (!this.isDbConnected || !this.dataSource || !this.orderRepo) {
+    if (!this.isDbConnected || !this.dataSource || !this.storeOrderRepo) {
       throw new ServiceUnavailableException('Order database is unavailable');
     }
     const statuses = criteria.statuses.length ? criteria.statuses : null;
@@ -1034,15 +1067,14 @@ export class OrderRepository implements OnModuleInit {
     const storeId = criteria.storeId || null;
     const params: unknown[] = [merchantId, storeId, statuses, createdVia, author, criteria.after || null, criteria.before || null];
     const where = `
-      FROM public.orders AS sale
-      LEFT JOIN public.store_orders AS store_sale ON store_sale.order_id = sale.id
+      FROM public.store_orders AS sale
       WHERE ($1::uuid IS NULL OR sale.merchant_id = $1::uuid)
         AND ($2::uuid IS NULL OR sale.store_id = $2::uuid)
         AND (
           $3::text[] IS NULL
           OR (
             CASE
-              WHEN NULLIF(store_sale.status, '') IS NOT NULL THEN lower(store_sale.status)
+              WHEN NULLIF(sale.status, '') IS NOT NULL THEN lower(sale.status)
               WHEN upper(sale.order_status) = 'CANCELLED' THEN 'cancelled'
               WHEN upper(sale.order_status) = 'COMPLETED' THEN 'completed'
               WHEN upper(sale.order_status) = 'PARTIAL_REFUND' THEN 'partial-refund'
@@ -1067,7 +1099,7 @@ export class OrderRepository implements OnModuleInit {
         AND (
           $5::text IS NULL
           OR COALESCE(
-            NULLIF(store_sale.placed_by, ''),
+            NULLIF(sale.placed_by, ''),
             NULLIF((
               SELECT entry->>'value'
               FROM jsonb_array_elements(COALESCE(sale.metadata, '[]'::jsonb)) AS entry
@@ -1086,7 +1118,7 @@ export class OrderRepository implements OnModuleInit {
       countRows = await this.dataSource.query(`SELECT COUNT(*)::int AS total ${where}`, params);
       const orderColumn = criteria.orderBy === 'modified' ? 'sale.updated_at' : 'sale.created_at';
       idRows = await this.dataSource.query(
-        `SELECT sale.id ${where} ORDER BY ${orderColumn} DESC LIMIT $8 OFFSET $9`,
+        `SELECT sale.order_id AS id ${where} ORDER BY ${orderColumn} DESC LIMIT $8 OFFSET $9`,
         [...params, criteria.perPage, (criteria.page - 1) * criteria.perPage],
       );
     } catch (error: unknown) {
@@ -1098,13 +1130,7 @@ export class OrderRepository implements OnModuleInit {
     const total = Number(countRows[0]?.total || 0);
     const ids = idRows.map((row) => row.id);
     if (!ids.length) return { total, orders: [] };
-    const orders = await this.orderRepo.find({ where: { id: In(ids) } });
-    const storeOrders = this.storeOrderRepo
-      ? await this.storeOrderRepo.find({ where: { orderId: In(ids) } })
-      : [];
-    const items = this.itemRepo
-      ? await this.itemRepo.find({ where: { orderId: In(ids) } })
-      : [];
+    const storeOrders = await this.storeOrderRepo.find({ where: { orderId: In(ids) } });
     const refundRows: Array<{
       order_id: string;
       amount: unknown;
@@ -1120,15 +1146,14 @@ export class OrderRepository implements OnModuleInit {
         ORDER BY created_at ASC`,
       [ids],
     );
-    const ordersById = new Map(orders.map((order) => [order.id, order]));
     const storeOrdersById = new Map(storeOrders.map((storeOrder) => [storeOrder.orderId, storeOrder]));
     const rows = ids.flatMap((id) => {
-      const order = ordersById.get(id);
-      if (!order) return [];
+      const storeOrder = storeOrdersById.get(id);
+      if (!storeOrder) return [];
       return [{
-        order,
-        storeOrder: storeOrdersById.get(id) ?? null,
-        items: items.filter((item) => item.orderId === id),
+        order: this.projectOrder(storeOrder),
+        storeOrder,
+        items: this.itemsFromStore(storeOrder),
         refunds: refundRows
           .filter((refund) => refund.order_id === id)
           .map(({ amount, metadata }) => ({ amount, metadata })),
@@ -1151,32 +1176,23 @@ export class OrderRepository implements OnModuleInit {
     const storeIds = [...new Set(rows.map((row) => row.order.storeId).filter(Boolean))];
     if (!storeIds.length) return;
 
-    const categories: Array<{
-      store_id?: string;
-      id?: string;
-      wordpress_id?: string;
-      slug?: string;
-      name?: string;
-      rate?: string;
-    }> = await this.dataSource.query(
-      `SELECT COALESCE(to_jsonb(category)->>'storeId', to_jsonb(category)->>'store_id') AS store_id,
-              COALESCE(to_jsonb(category)->>'id', '') AS id,
-              COALESCE(to_jsonb(category)->>'wordpressId', to_jsonb(category)->>'wordpress_id', '') AS wordpress_id,
-              COALESCE(to_jsonb(category)->>'slug', '') AS slug,
-              COALESCE(to_jsonb(category)->>'name', '') AS name,
-              COALESCE(to_jsonb(category)->>'posTaxPercent', to_jsonb(category)->>'pos_tax_percent') AS rate
-         FROM public.categories AS category
-        WHERE COALESCE(to_jsonb(category)->>'storeId', to_jsonb(category)->>'store_id') = ANY($1::text[])`,
+    const categories: Array<{ store_id?: string; category?: Record<string, unknown> }> = await this.dataSource.query(
+      `SELECT catalog.store_id::text AS store_id, category
+         FROM public.store_categories AS catalog
+         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(catalog.payload, '[]'::jsonb)) AS category
+        WHERE catalog.store_id = ANY($1::uuid[])
+          AND COALESCE(catalog.is_deleted, false) = false`,
       [storeIds],
     );
     const rates = new Map<string, number>();
-    categories.forEach((category) => {
-      const rate = Number(category.rate);
-      if (!category.store_id || !Number.isFinite(rate)) return;
-      [category.id, category.wordpress_id, category.slug, category.name]
+    categories.forEach((row) => {
+      const category = row.category || {};
+      const rate = Number(category.pos_tax_percent ?? category.posTaxPercent ?? category.rate);
+      if (!row.store_id || !Number.isFinite(rate)) return;
+      [category.id, category.wordpressId, category.wordpress_id, category.slug, category.name]
         .map((value) => String(value || '').trim().toLowerCase())
         .filter(Boolean)
-        .forEach((key) => rates.set(`${category.store_id}:${key}`, rate));
+        .forEach((key) => rates.set(`${row.store_id}:${key}`, rate));
     });
 
     rows.forEach(({ order, storeOrder }) => {
@@ -1369,7 +1385,7 @@ export class OrderRepository implements OnModuleInit {
   async getOrderDetails(id: string, storeId?: string) {
     const key = String(id || '').trim();
     if (!key) return null;
-    if (!this.isDbConnected || !this.orderRepo || !this.itemRepo) {
+    if (!this.isDbConnected || !this.storeOrderRepo) {
       throw new ServiceUnavailableException('Order database is unavailable');
     }
     const scopedStore = storeId?.trim() || undefined;
@@ -1379,9 +1395,9 @@ export class OrderRepository implements OnModuleInit {
         return { order: byId.order, items: byId.items, storeOrder: byId.storeOrder };
       }
     }
-    let matches: OrderEntity[] = [];
+    let matches: StoreOrderEntity[] = [];
     try {
-      matches = await this.orderRepo.find({
+      matches = await this.storeOrderRepo.find({
         where: scopedStore
           ? { clientOrderId: key, storeId: scopedStore }
           : { clientOrderId: key },
@@ -1396,9 +1412,11 @@ export class OrderRepository implements OnModuleInit {
     }
     const match = matches[0];
     if (!match) return null;
-    const graph = await this.getOrderById(match.id);
-    if (!graph) return null;
-    return { order: graph.order, items: graph.items, storeOrder: graph.storeOrder };
+    return {
+      order: this.projectOrder(match),
+      items: this.itemsFromStore(match),
+      storeOrder: match,
+    };
   }
 
   private isUuid(value: string): boolean {
@@ -1406,10 +1424,11 @@ export class OrderRepository implements OnModuleInit {
   }
 
   async getOrdersByStore(storeId: string): Promise<OrderEntity[]> {
-    if (this.isDbConnected && this.orderRepo) {
-      return this.orderRepo.find({ where: { storeId }, order: { createdAt: 'DESC' } });
+    if (this.isDbConnected && this.storeOrderRepo) {
+      const rows = await this.storeOrderRepo.find({ where: { storeId }, order: { createdAt: 'DESC' } });
+      return rows.map((row) => this.projectOrder(row));
     }
-    return this.inMemoryOrders.filter(o => o.storeId === storeId);
+    return this.inMemoryOrders.filter(order => order.storeId === storeId);
   }
 
   async getStorePosPayments(storeId: string) {
@@ -1422,7 +1441,7 @@ export class OrderRepository implements OnModuleInit {
         `SELECT
          payment.id,
          payment.order_id,
-         order_record.order_number,
+         store_sale.order_number,
          payment.merchant_id,
          payment.store_id,
          payment.local_id,
@@ -1455,7 +1474,6 @@ export class OrderRepository implements OnModuleInit {
          payment.provider_transaction_id,
          payment.payment_at
        FROM public.store_pos_payments AS payment
-       LEFT JOIN public.orders AS order_record ON order_record.id = payment.order_id
        LEFT JOIN public.store_orders AS store_sale ON store_sale.order_id = payment.order_id
        WHERE payment.store_id = $1::uuid
          AND payment.deleted_at IS NULL
@@ -1478,12 +1496,13 @@ export class OrderRepository implements OnModuleInit {
     let rows: Array<{ id: string }>;
     try {
       rows = await this.dataSource.query(
-        `SELECT sale.id
-           FROM public.orders AS sale
+        `SELECT sale.order_id AS id
+           FROM public.store_orders AS sale
           WHERE sale.merchant_id = $1::uuid
             AND sale.store_id = $2::uuid
             AND (
               sale.client_order_id = $3
+              OR sale.order_id::text = $3
               OR sale.id::text = $3
               OR sale.order_number = $3
             )
@@ -1545,14 +1564,14 @@ export class OrderRepository implements OnModuleInit {
     try {
       return await this.dataSource.transaction(async manager => {
         const rows = await manager.query(
-          `SELECT sale.id, sale.order_number, sale.total_amount, sale.order_status,
-                  sale.payment_method, store_sale.currency
-             FROM public.orders AS sale
-             LEFT JOIN public.store_orders AS store_sale ON store_sale.order_id = sale.id
+          `SELECT sale.order_id AS id, sale.order_number, sale.total AS total_amount, sale.order_status,
+                  sale.payment_method, sale.currency, sale.line_items
+             FROM public.store_orders AS sale
             WHERE sale.merchant_id = $1::uuid
               AND sale.store_id = $2::uuid
               AND (
                 sale.client_order_id = $3
+                OR sale.order_id::text = $3
                 OR sale.id::text = $3
                 OR sale.order_number = $3
               )
@@ -1591,12 +1610,12 @@ export class OrderRepository implements OnModuleInit {
           [order.id],
         );
         const paymentMethod = String(paymentRows[0]?.payment_method || order.payment_method || 'Cash');
-        const lineItems = await manager.query(
-          `SELECT id, product_id, product_name, quantity
-             FROM public.order_line_items
-            WHERE order_id = $1::uuid`,
-          [order.id],
-        );
+        const lineItems = (Array.isArray(order.line_items) ? order.line_items : []).map((item: any, index: number) => ({
+          id: item.id || `ITEM-${order.id}-${index + 1}`,
+          product_id: item.product_id ?? item.productId,
+          product_name: item.name || item.product_name,
+          quantity: item.quantity,
+        }));
         const refundId = randomUUID();
         const remainingAfter = Math.max(0, remaining - refundedAmount);
         const metadata = {
@@ -1635,20 +1654,28 @@ export class OrderRepository implements OnModuleInit {
           ],
         );
         await manager.query(
-          `UPDATE public.orders
-              SET order_status = 'REFUNDED', payment_status = 'REFUNDED', updated_at = now()
-            WHERE id = $1::uuid`,
-          [order.id],
-        );
-        await manager.query(
-          `UPDATE public.store_orders SET status = 'refunded', updated_at = now()
+          `UPDATE public.store_orders
+              SET order_status = 'REFUNDED',
+                  payment_status = 'REFUNDED',
+                  status = 'refunded',
+                  status_history = COALESCE(status_history, '[]'::jsonb) || $2::jsonb,
+                  updated_at = now()
             WHERE order_id = $1::uuid`,
-          [order.id],
+          [order.id, JSON.stringify([{
+            id: `HST-${refundId}`,
+            orderId: order.id,
+            fromStatus: String(order.order_status || 'COMPLETED'),
+            toStatus: 'REFUNDED',
+            changedBy: input.performedBy,
+            reason: input.reason,
+            createdAt: new Date().toISOString(),
+          }])],
         );
         await manager.query(
           `INSERT INTO public.order_status_history
              (id, order_id, from_status, to_status, changed_by, reason, created_at)
-           VALUES ($1, $2::uuid, $3, 'REFUNDED', $4, $5, now())`,
+           VALUES ($1, $2::uuid, $3, 'REFUNDED', $4, $5, now())
+           ON CONFLICT (id) DO NOTHING`,
           [`HST-${refundId}`, order.id, String(order.order_status || 'COMPLETED'), input.performedBy, input.reason],
         );
 
@@ -1722,13 +1749,17 @@ export class OrderRepository implements OnModuleInit {
     try {
       return await this.dataSource.transaction(async manager => {
         const rows = await manager.query(
-          `SELECT sale.id, sale.order_number, sale.total_amount, sale.order_status,
-                  sale.payment_method, store_sale.currency, store_sale.line_items
-             FROM public.orders AS sale
-             LEFT JOIN public.store_orders AS store_sale ON store_sale.order_id = sale.id
+          `SELECT sale.order_id AS id, sale.order_number, sale.total AS total_amount, sale.order_status,
+                  sale.payment_method, sale.currency, sale.line_items
+             FROM public.store_orders AS sale
             WHERE sale.merchant_id = $1::uuid
               AND sale.store_id = $2::uuid
-              AND (sale.client_order_id = $3 OR sale.id::text = $3 OR sale.order_number = $3)
+              AND (
+                sale.client_order_id = $3
+                OR sale.order_id::text = $3
+                OR sale.id::text = $3
+                OR sale.order_number = $3
+              )
             ORDER BY sale.created_at DESC
             LIMIT 1
             FOR UPDATE OF sale`,
@@ -1750,13 +1781,8 @@ export class OrderRepository implements OnModuleInit {
         const remainingOrderAmount = Math.max(0, orderTotal - alreadyRefunded);
         if (remainingOrderAmount <= 0) return { kind: 'already_refunded' as const };
 
-        const entityLines = await manager.query(
-          `SELECT id, product_id, product_name, quantity, total_price, modifiers
-             FROM public.order_line_items WHERE order_id = $1::uuid`,
-          [order.id],
-        );
         const storedLines = Array.isArray(order.line_items) ? order.line_items : [];
-        const allLines = storedLines.length ? storedLines : entityLines;
+        const allLines = storedLines;
         const positiveTotal = allLines.reduce((sum: number, line: any) => {
           const value = Number(line.total ?? line.total_price ?? 0);
           return value > 0 ? sum + value : sum;
@@ -1776,8 +1802,7 @@ export class OrderRepository implements OnModuleInit {
           // lines: the store_orders JSON snapshot and canonical order_line_items.
           // Their IDs are not guaranteed to be identical. Completed-orders can
           // expose either one, so refund validation must accept both sources.
-          const line = storedLines.find((candidate: any) => String(candidate?.id ?? '') === requested.orderItemId)
-            || entityLines.find((candidate: any) => String(candidate?.id ?? '') === requested.orderItemId);
+          const line = storedLines.find((candidate: any) => String(candidate?.id ?? '') === requested.orderItemId);
           if (!line) return { kind: 'invalid_item' as const };
           const maxQuantity = Number(line.quantity || 0);
           const refundedQuantity = previousItems
@@ -1838,24 +1863,31 @@ export class OrderRepository implements OnModuleInit {
               items_reusable: input.restock ? 'yes' : 'no', items: input.items })],
         );
         await manager.query(
-          `UPDATE public.orders SET order_status = 'PARTIAL_REFUND', updated_at = now() WHERE id = $1::uuid`,
-          [order.id],
-        );
-        await manager.query(
           `UPDATE public.store_orders
-              SET status = 'partial-refund',
+              SET order_status = 'PARTIAL_REFUND',
+                  status = 'partial-refund',
+                  status_history = COALESCE(status_history, '[]'::jsonb) || $3::jsonb,
                   meta_data = COALESCE(meta_data, '[]'::jsonb) || $2::jsonb,
                   updated_at = now()
             WHERE order_id = $1::uuid`,
           [order.id, JSON.stringify([
             { key: '_pos_partial_order_total', value: remainingAfter.toFixed(2) },
             { key: '_pos_refund_id', value: refundId },
-          ])],
+          ]), JSON.stringify([{
+            id: `HST-${refundId}`,
+            orderId: order.id,
+            fromStatus: String(order.order_status || 'COMPLETED'),
+            toStatus: 'PARTIAL_REFUND',
+            changedBy: input.performedBy,
+            reason: input.reason,
+            createdAt: new Date().toISOString(),
+          }])],
         );
         await manager.query(
           `INSERT INTO public.order_status_history
              (id, order_id, from_status, to_status, changed_by, reason, created_at)
-           VALUES ($1, $2::uuid, $3, 'PARTIAL_REFUND', $4, $5, now())`,
+           VALUES ($1, $2::uuid, $3, 'PARTIAL_REFUND', $4, $5, now())
+           ON CONFLICT (id) DO NOTHING`,
           [`HST-${refundId}`, order.id, String(order.order_status || 'COMPLETED'), input.performedBy, input.reason],
         );
 
@@ -1909,37 +1941,270 @@ export class OrderRepository implements OnModuleInit {
   }
 
   async getOrderById(orderId: string): Promise<{ order: OrderEntity; items: OrderItemEntity[]; history: OrderStatusHistoryEntity[]; storeOrder: StoreOrderEntity | null } | null> {
-    if (this.isDbConnected && this.orderRepo && this.itemRepo && this.historyRepo) {
-      const order = await this.orderRepo.findOne({ where: { id: orderId } });
-      if (!order) return null;
-      const items = await this.itemRepo.find({ where: { orderId } });
-      const history = await this.historyRepo.find({ where: { orderId }, order: { createdAt: 'ASC' } });
-      const storeOrder = await this.findStoreOrder(orderId);
-      return { order, items, history, storeOrder };
-    } else {
-      const order = this.inMemoryOrders.find(o => o.id === orderId);
-      if (!order) return null;
-      const items = this.inMemoryItems.filter(i => i.orderId === orderId);
-      const history = this.inMemoryHistory.filter(h => h.orderId === orderId);
-      return { order, items, history, storeOrder: null };
+    if (this.isDbConnected && this.storeOrderRepo) {
+      const storeOrder = await this.storeOrderRepo.findOne({ where: { orderId } });
+      if (!storeOrder) return null;
+      const items = this.itemRepo ? await this.itemRepo.find({ where: { orderId } }) : [];
+      const history = this.historyRepo
+        ? await this.historyRepo.find({ where: { orderId }, order: { createdAt: 'ASC' } })
+        : [];
+      return {
+        order: this.projectOrder(storeOrder),
+        items: items.length ? items : this.itemsFromStore(storeOrder),
+        history: history.length ? history : this.historyFromStore(storeOrder),
+        storeOrder,
+      };
     }
+    const order = this.inMemoryOrders.find(entry => entry.id === orderId);
+    if (!order) return null;
+    const items = this.inMemoryItems.filter(item => item.orderId === orderId);
+    const history = this.inMemoryHistory.filter(entry => entry.orderId === orderId);
+    return { order, items, history, storeOrder: null };
   }
 
-  private async recordStatusChange(orderId: string, fromStatus: string, toStatus: string, changedBy: string, reason?: string) {
-    const entry: OrderStatusHistoryEntity = {
-      id: `HST-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      orderId,
-      fromStatus,
-      toStatus,
-      changedBy: changedBy || 'POS System',
-      reason: reason || 'State Machine Transition',
-      createdAt: new Date(),
+  private projectOrder(store: StoreOrderEntity): OrderEntity {
+    return {
+      id: store.orderId,
+      orderNumber: store.orderNumber || '',
+      merchantId: store.merchantId,
+      storeId: store.storeId,
+      shiftId: store.shiftId,
+      localShiftId: store.localShiftId,
+      clientOrderId: store.clientOrderId,
+      offline: Boolean(store.offline),
+      metadata: store.metadata || (Array.isArray(store.metaData) ? store.metaData as OrderEntity['metadata'] : []),
+      requestPayload: store.requestPayload,
+      customerName: store.customerName || 'Walk-in Customer',
+      customerPhone: store.customerPhone,
+      orderType: (store.orderType as OrderType) || OrderType.IN_STORE_POS,
+      paymentMethod: (store.paymentMethodCode as PaymentMethod) || PaymentMethod.CASH,
+      paymentStatus: (store.paymentStatus as PaymentStatus) || PaymentStatus.PAID,
+      subtotal: Number(store.subtotal || 0),
+      taxAmount: Number(store.taxTotal || 0),
+      discountAmount: Number(store.discountTotal || 0),
+      tipAmount: Number(store.tipAmount || 0),
+      totalAmount: Number(store.total || 0),
+      orderStatus: (store.orderStatus as OrderStatus) || OrderStatus.CREATED,
+      createdAt: store.createdAt,
+      updatedAt: store.updatedAt,
     };
-    if (this.isDbConnected && this.historyRepo) {
-      await this.historyRepo.save(this.historyRepo.create(entry));
-    } else {
-      this.inMemoryHistory.push(entry);
+  }
+
+  private itemsFromStore(store: StoreOrderEntity): OrderItemEntity[] {
+    const lines = Array.isArray(store.lineItems) ? store.lineItems : [];
+    return lines.map((raw, index) => {
+      const line = raw as Record<string, unknown>;
+      const quantity = Number(line.quantity || 1);
+      const total = Number(line.total ?? line.total_price ?? 0);
+      return {
+        id: String(line.id || `ITEM-${store.orderId}-${index + 1}`),
+        orderId: store.orderId,
+        productId: String(line.product_id ?? line.productId ?? ''),
+        productName: String(line.name || line.product_name || 'Sales Item'),
+        quantity,
+        unitPrice: Number(line.price ?? line.unit_price ?? (quantity ? total / quantity : 0)),
+        totalPrice: total,
+        modifiers: Array.isArray(line.meta_data) ? line.meta_data : undefined,
+      };
+    });
+  }
+
+  private historyFromStore(store: StoreOrderEntity): OrderStatusHistoryEntity[] {
+    const rows = Array.isArray(store.statusHistory) ? store.statusHistory : [];
+    return rows.map((raw) => raw as OrderStatusHistoryEntity);
+  }
+
+  private async consolidateDuplicateTables(): Promise<void> {
+    if (!this.dataSource) return;
+    await this.dataSource.query(`
+      ALTER TABLE public.store_orders
+        ADD COLUMN IF NOT EXISTS order_number varchar(100) DEFAULT '',
+        ADD COLUMN IF NOT EXISTS customer_name varchar(150) DEFAULT 'Walk-in Customer',
+        ADD COLUMN IF NOT EXISTS customer_phone varchar(50),
+        ADD COLUMN IF NOT EXISTS order_type varchar(50) DEFAULT 'IN_STORE_POS',
+        ADD COLUMN IF NOT EXISTS payment_method_code varchar(50),
+        ADD COLUMN IF NOT EXISTS payment_status varchar(50) DEFAULT 'PAID',
+        ADD COLUMN IF NOT EXISTS tip_amount numeric(12,2) NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS offline boolean NOT NULL DEFAULT false,
+        ADD COLUMN IF NOT EXISTS local_shift_id varchar(100),
+        ADD COLUMN IF NOT EXISTS metadata jsonb,
+        ADD COLUMN IF NOT EXISTS request_payload jsonb,
+        ADD COLUMN IF NOT EXISTS order_status varchar(50) DEFAULT 'CREATED',
+        ADD COLUMN IF NOT EXISTS status_history jsonb NOT NULL DEFAULT '[]'::jsonb
+    `);
+    const orders = await this.dataSource.query(`SELECT to_regclass('public.orders') AS name`);
+    if (orders[0]?.name) {
+      await this.dataSource.query(`
+        UPDATE public.store_orders AS sale
+           SET order_number = legacy.order_number,
+               customer_name = COALESCE(legacy.customer_name, sale.customer_name),
+               customer_phone = legacy.customer_phone,
+               order_type = COALESCE(legacy.order_type, sale.order_type),
+               payment_method_code = legacy.payment_method,
+               payment_status = COALESCE(legacy.payment_status, sale.payment_status),
+               tip_amount = COALESCE(legacy.tip_amount, 0),
+               offline = COALESCE(legacy.offline, false),
+               local_shift_id = legacy.local_shift_id,
+               metadata = legacy.metadata,
+               request_payload = legacy.request_payload,
+               order_status = COALESCE(legacy.order_status, sale.order_status)
+          FROM public.orders AS legacy
+         WHERE sale.order_id = legacy.id
+      `);
     }
+    const history = await this.dataSource.query(`SELECT to_regclass('public.order_status_history') AS name`);
+    if (history[0]?.name) {
+      await this.dataSource.query(`
+        UPDATE public.store_orders AS sale
+           SET status_history = COALESCE((
+             SELECT jsonb_agg(jsonb_build_object(
+               'id', entry.id,
+               'orderId', entry.order_id,
+               'fromStatus', entry.from_status,
+               'toStatus', entry.to_status,
+               'changedBy', entry.changed_by,
+               'reason', entry.reason,
+               'createdAt', entry.created_at
+             ) ORDER BY entry.created_at)
+             FROM public.order_status_history AS entry
+             WHERE entry.order_id = sale.order_id
+           ), sale.status_history, '[]'::jsonb)
+         WHERE EXISTS (
+           SELECT 1 FROM public.order_status_history AS entry WHERE entry.order_id = sale.order_id
+         )
+      `);
+    }
+    const categories = await this.dataSource.query(`SELECT to_regclass('public.categories') AS name`);
+    const storeCategories = await this.dataSource.query(`SELECT to_regclass('public.store_categories') AS name`);
+    if (categories[0]?.name && storeCategories[0]?.name) {
+      await this.dataSource.query(`
+        UPDATE public.store_categories AS catalog
+           SET payload = COALESCE(catalog.payload, '[]'::jsonb) || COALESCE((
+             SELECT jsonb_agg(to_jsonb(category))
+               FROM public.categories AS category
+              WHERE COALESCE(to_jsonb(category)->>'storeId', to_jsonb(category)->>'store_id') = catalog.store_id::text
+                AND NOT EXISTS (
+                  SELECT 1
+                    FROM jsonb_array_elements(COALESCE(catalog.payload, '[]'::jsonb)) AS saved
+                   WHERE saved->>'id' = COALESCE(to_jsonb(category)->>'wordpressId', to_jsonb(category)->>'wordpress_id')
+                      OR saved->>'wordpressId' = COALESCE(to_jsonb(category)->>'wordpressId', to_jsonb(category)->>'wordpress_id')
+                )
+           ), '[]'::jsonb)
+      `);
+    }
+    await this.dataSource.query(`
+      ALTER TABLE public.store_pos_payments DROP CONSTRAINT IF EXISTS store_pos_payments_order_id_fkey
+    `);
+    await this.dataSource.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS store_orders_order_id_uidx
+      ON public.store_orders (order_id)
+    `);
+    const payments = await this.dataSource.query(`SELECT to_regclass('public.store_pos_payments') AS name`);
+    if (payments[0]?.name) {
+      await this.dataSource.query(`
+        ALTER TABLE public.store_pos_payments
+          ADD CONSTRAINT store_pos_payments_order_id_fkey
+          FOREIGN KEY (order_id) REFERENCES public.store_orders(order_id) ON DELETE CASCADE
+      `);
+    }
+    await this.dataSource.query(`DROP TABLE IF EXISTS public.orders`);
+    await this.ensureOrderDetailTables();
+    await this.dataSource.query(`DROP TABLE IF EXISTS public.products`);
+    await this.dataSource.query(`DROP TABLE IF EXISTS public.product`);
+    await this.dataSource.query(`DROP TABLE IF EXISTS public.categories`);
+  }
+
+  private async saveLineItems(manager: EntityManager, orderId: string, items: OrderItemEntity[], replace: boolean): Promise<void> {
+    const repository = manager.getRepository(OrderItemEntity);
+    if (replace) await repository.delete({ orderId });
+    if (!items.length) return;
+    await repository.save(items.map((item) => repository.create({ ...item, orderId })));
+  }
+
+  private async saveStatusHistory(manager: EntityManager, entry: OrderStatusHistoryEntity): Promise<void> {
+    if (!entry?.id) return;
+    const repository = manager.getRepository(OrderStatusHistoryEntity);
+    await repository.save(repository.create({
+      ...entry,
+      createdAt: entry.createdAt ? new Date(entry.createdAt) : new Date(),
+    }));
+  }
+
+  private async ensureOrderDetailTables(): Promise<void> {
+    if (!this.dataSource) return;
+    await this.dataSource.query(`
+      CREATE TABLE IF NOT EXISTS public.order_line_items (
+        id varchar(100) PRIMARY KEY,
+        order_id uuid NOT NULL,
+        product_id varchar(100) NOT NULL,
+        product_name varchar(255) NOT NULL,
+        quantity numeric(10,2) NOT NULL,
+        unit_price numeric(10,2) NOT NULL,
+        total_price numeric(10,2) NOT NULL,
+        modifiers jsonb
+      )
+    `);
+    await this.dataSource.query(`
+      CREATE TABLE IF NOT EXISTS public.order_status_history (
+        id varchar(100) PRIMARY KEY,
+        order_id uuid NOT NULL,
+        from_status varchar(50) NOT NULL,
+        to_status varchar(50) NOT NULL,
+        changed_by varchar(150) NOT NULL,
+        reason varchar(255),
+        created_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS order_line_items_order_id_idx ON public.order_line_items (order_id)
+    `);
+    await this.dataSource.query(`
+      CREATE INDEX IF NOT EXISTS order_status_history_order_id_idx ON public.order_status_history (order_id)
+    `);
+    await this.dataSource.query(`
+      INSERT INTO public.order_line_items
+        (id, order_id, product_id, product_name, quantity, unit_price, total_price, modifiers)
+      SELECT LEFT(COALESCE(NULLIF(line->>'id', ''), 'ITEM-' || sale.order_id::text || '-' || ordinality::text), 100),
+             sale.order_id,
+             LEFT(COALESCE(line->>'product_id', line->>'productId', ''), 100),
+             LEFT(COALESCE(NULLIF(line->>'name', ''), NULLIF(line->>'product_name', ''), 'Sales Item'), 255),
+             CASE WHEN COALESCE(line->>'quantity', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                  THEN (line->>'quantity')::numeric ELSE 1 END,
+             CASE WHEN COALESCE(line->>'price', line->>'unit_price', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                  THEN COALESCE(line->>'price', line->>'unit_price')::numeric
+                  WHEN COALESCE(line->>'quantity', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                   AND (line->>'quantity')::numeric <> 0
+                   AND COALESCE(line->>'total', line->>'total_price', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                  THEN COALESCE(line->>'total', line->>'total_price')::numeric / (line->>'quantity')::numeric
+                  ELSE 0 END,
+             CASE WHEN COALESCE(line->>'total', line->>'total_price', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                  THEN COALESCE(line->>'total', line->>'total_price')::numeric ELSE 0 END,
+             CASE WHEN jsonb_typeof(line->'meta_data') = 'array' THEN line->'meta_data' ELSE NULL END
+        FROM public.store_orders AS sale
+        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(sale.line_items, '[]'::jsonb))
+          WITH ORDINALITY AS lines(line, ordinality)
+      ON CONFLICT (id) DO NOTHING
+    `);
+    await this.dataSource.query(`
+      INSERT INTO public.order_status_history
+        (id, order_id, from_status, to_status, changed_by, reason, created_at)
+      SELECT LEFT(COALESCE(NULLIF(entry->>'id', ''), 'HST-' || sale.order_id::text || '-' || ordinality::text), 100),
+             sale.order_id,
+             LEFT(COALESCE(NULLIF(entry->>'fromStatus', ''), NULLIF(entry->>'from_status', ''), 'NONE'), 50),
+             LEFT(COALESCE(NULLIF(entry->>'toStatus', ''), NULLIF(entry->>'to_status', ''), NULLIF(sale.order_status, ''), 'CREATED'), 50),
+             LEFT(COALESCE(NULLIF(entry->>'changedBy', ''), NULLIF(entry->>'changed_by', ''), 'POS System'), 150),
+             LEFT(COALESCE(entry->>'reason', ''), 255),
+             COALESCE(
+               CASE WHEN COALESCE(entry->>'createdAt', entry->>'created_at', '') ~ '^[0-9]{4}-'
+                    THEN COALESCE(entry->>'createdAt', entry->>'created_at')::timestamptz END,
+               sale.created_at,
+               now()
+             )
+        FROM public.store_orders AS sale
+        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(sale.status_history, '[]'::jsonb))
+          WITH ORDINALITY AS entries(entry, ordinality)
+      ON CONFLICT (id) DO NOTHING
+    `);
   }
 
   private async cacheOrder(order: OrderEntity) {

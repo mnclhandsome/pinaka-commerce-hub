@@ -138,7 +138,7 @@ export class DeviceActivationController {
           }
 
           const [associatedMerchant] = await manager.query(
-            `SELECT id, "merchantCode", business_display_name AS "businessDisplayName",
+            `SELECT id, merchant_code AS "merchantCode", business_display_name AS "businessDisplayName",
                   first_name AS "firstName", last_name AS "lastName", email, phone, status
             FROM public.merchants
             WHERE id::text = $1

@@ -10,12 +10,7 @@ export async function ensureMerchantCrudSchema(db: DataSource): Promise<void> {
         WHERE table_schema='public' AND table_name='merchants'`)).map((row: {column_name: string}) => row.column_name));
 
       await manager.query(`ALTER TABLE public.merchants
-        ADD COLUMN IF NOT EXISTS "merchantCode" varchar(100),
-        ADD COLUMN IF NOT EXISTS "merchantId" varchar(100),
         ADD COLUMN IF NOT EXISTS "merchantName" varchar(150),
-        ADD COLUMN IF NOT EXISTS "businessDisplayName" varchar(255),
-        ADD COLUMN IF NOT EXISTS "addressLine1" text,
-        ADD COLUMN IF NOT EXISTS "addressLine2" text,
         ADD COLUMN IF NOT EXISTS "planId" uuid,
         ADD COLUMN IF NOT EXISTS "billingCycle" varchar(20),
         ADD COLUMN IF NOT EXISTS "startDate" date,
@@ -31,7 +26,7 @@ export async function ensureMerchantCrudSchema(db: DataSource): Promise<void> {
         await manager.query('UPDATE public.merchants SET "merchantName"=COALESCE("merchantName", "ownerName") WHERE "merchantName" IS NULL');
       }
       if (columns.has('businessName')) {
-        await manager.query('UPDATE public.merchants SET "businessDisplayName"=COALESCE("businessDisplayName", "businessName") WHERE "businessDisplayName" IS NULL');
+        await manager.query('UPDATE public.merchants SET business_display_name=COALESCE(business_display_name, "businessName") WHERE business_display_name IS NULL');
       }
       if (columns.has('businessAddress')) {
         await manager.query('UPDATE public.merchants SET "addressLine1"=COALESCE("addressLine1", "businessAddress") WHERE "addressLine1" IS NULL');

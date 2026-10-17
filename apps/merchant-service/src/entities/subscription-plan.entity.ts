@@ -2,7 +2,7 @@ import { Column, CreateDateColumn, Entity, PrimaryColumn, UpdateDateColumn } fro
 
 @Entity('subscription_plans')
 export class SubscriptionPlanEntity {
-  @PrimaryColumn({ type: 'varchar', length: 50 }) planCode!: string;
+  @PrimaryColumn({ name: 'plan_code', type: 'varchar', length: 50 }) planCode!: string;
   @Column({ type: 'varchar', length: 100 }) planName!: string;
   @Column({ type: 'text', default: '' }) description!: string;
   @Column({ type: 'integer' }) maxStoresAllowed!: number;

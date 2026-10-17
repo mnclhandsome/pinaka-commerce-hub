@@ -194,65 +194,6 @@ export class WooCommerceConnectorService implements OnModuleInit {
 
   private async ensureProductTables(): Promise<void> {
     if (!this.dataSource || !this.dataSource.isInitialized) return;
-    try {
-      await this.dataSource.query(`
-        CREATE TABLE IF NOT EXISTS categories (
-          id UUID PRIMARY KEY,
-          "merchantId" VARCHAR(100) NOT NULL,
-          "storeId" VARCHAR(100) NOT NULL,
-          "wordpressId" INT NOT NULL,
-          "parentWordpressId" INT DEFAULT 0,
-          name VARCHAR(255) NOT NULL,
-          slug VARCHAR(255) DEFAULT '',
-          description TEXT DEFAULT '',
-          "productCount" INT DEFAULT 0,
-          image VARCHAR(2048),
-          "posTaxClass" VARCHAR(100) DEFAULT '',
-          "posTaxPercent" VARCHAR(20) DEFAULT '',
-          payload JSONB,
-          "createdAt" TIMESTAMPTZ DEFAULT NOW(),
-          "updatedAt" TIMESTAMPTZ DEFAULT NOW()
-        );
-      `);
-
-      await this.dataSource.query(`
-        CREATE TABLE IF NOT EXISTS products (
-          id UUID PRIMARY KEY,
-          "merchantId" VARCHAR(100) NOT NULL,
-          "storeId" VARCHAR(100) NOT NULL,
-          "categoryId" UUID,
-          "wordpressId" INT NOT NULL,
-          "wordpressCategoryId" INT,
-          name VARCHAR(255) NOT NULL,
-          price DECIMAL(12,2),
-          image VARCHAR(2048),
-          tags JSONB DEFAULT '[]'::jsonb,
-          payload JSONB,
-          "createdAt" TIMESTAMPTZ DEFAULT NOW(),
-          "updatedAt" TIMESTAMPTZ DEFAULT NOW()
-        );
-      `);
-
-      await this.dataSource.query(`
-        CREATE TABLE IF NOT EXISTS product (
-          id UUID PRIMARY KEY,
-          "merchantId" VARCHAR(100),
-          "storeId" VARCHAR(100),
-          "categoryId" UUID,
-          "wordpressId" INT,
-          "wordpressCategoryId" INT,
-          name VARCHAR(255),
-          price DECIMAL(12,2),
-          image VARCHAR(2048),
-          tags JSONB DEFAULT '[]'::jsonb,
-          payload JSONB,
-          "createdAt" TIMESTAMPTZ DEFAULT NOW(),
-          "updatedAt" TIMESTAMPTZ DEFAULT NOW()
-        );
-      `);
-    } catch (e: any) {
-      console.log('⚠️ [Product Table Init] ' + e.message);
-    }
   }
 
   // --- Dynamic Store Catalog Synchronization & Persistence ---
@@ -303,62 +244,31 @@ export class WooCommerceConnectorService implements OnModuleInit {
       try {
         const liveProducts = await this.fetchLiveWordPressCatalog(cleanUrl, jwtToken);
 
-        for (const item of liveProducts) {
-          const catWpId = item.categoryId || 1;
-          const prodWpId = item.id;
-
-          // 1. Upsert into categories table dynamically
-          let categoryId = crypto.randomUUID();
-          const existingCat = await this.dataSource.query(
-            `SELECT id FROM categories WHERE "storeId" = $1 AND "wordpressId" = $2 LIMIT 1`,
-            [targetStore, catWpId]
-          );
-
-          if (existingCat && existingCat.length > 0) {
-            categoryId = existingCat[0].id;
-          } else {
-            await this.dataSource.query(
-              `INSERT INTO categories (id, "merchantId", "storeId", "wordpressId", name, slug, description, "createdAt", "updatedAt")
-               VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())`,
-              [categoryId, targetMerchant, targetStore, catWpId, item.category, item.category.toLowerCase().replace(/\s+/g, '-'), `Imported from ${cleanUrl}`]
-            );
-          }
-
-          // 2. Upsert into products table dynamically
-          const existingProd = await this.dataSource.query(
-            `SELECT id FROM products WHERE "storeId" = $1 AND "wordpressId" = $2 LIMIT 1`,
-            [targetStore, prodWpId]
-          );
-
-          const prodUuid = (existingProd && existingProd.length > 0) ? existingProd[0].id : crypto.randomUUID();
-          if (existingProd && existingProd.length > 0) {
-            await this.dataSource.query(
-              `UPDATE products 
-               SET "merchantId" = $1, "categoryId" = $2, "wordpressCategoryId" = $3, name = $4, price = $5, image = $6, payload = $7, "updatedAt" = NOW()
-               WHERE id = $8`,
-              [targetMerchant, categoryId, catWpId, item.name, item.price, item.image || null, JSON.stringify(item), prodUuid]
-            );
-          } else {
-            await this.dataSource.query(
-              `INSERT INTO products (id, "merchantId", "storeId", "categoryId", "wordpressId", "wordpressCategoryId", name, price, image, payload, "createdAt", "updatedAt")
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())`,
-              [prodUuid, targetMerchant, targetStore, categoryId, prodWpId, catWpId, item.name, item.price, item.image || null, JSON.stringify(item)]
-            );
-          }
-
-          // 3. Upsert into product table dynamically
-          try {
-            await this.dataSource.query(
-              `INSERT INTO product (id, "merchantId", "storeId", "categoryId", "wordpressId", "wordpressCategoryId", name, price, image, payload, "createdAt", "updatedAt")
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-               ON CONFLICT (id) DO UPDATE SET "merchantId" = EXCLUDED."merchantId", name = EXCLUDED.name, price = EXCLUDED.price, image = EXCLUDED.image, "updatedAt" = NOW()`,
-              [prodUuid, targetMerchant, targetStore, categoryId, prodWpId, catWpId, item.name, item.price, item.image || null, JSON.stringify(item)]
-            );
-          } catch {}
-
-          syncedCount++;
-        }
-        console.log(`🛒 [WooCommerce Dynamic Ingest] Synced ${syncedCount} items into products table for Store: ${targetStore}`);
+        const categories = new Map<number, { id: number; name: string; slug: string }>();
+        liveProducts.forEach((item) => {
+          const categoryId = item.categoryId || 1;
+          categories.set(categoryId, {
+            id: categoryId,
+            name: item.category,
+            slug: String(item.category || '').toLowerCase().replace(/\s+/g, '-'),
+          });
+        });
+        await this.dataSource.query(
+          `INSERT INTO public.store_products (store_id, payload, updated_at)
+           VALUES ($1::uuid, $2::jsonb, now())
+           ON CONFLICT (store_id)
+           DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), is_deleted = false`,
+          [targetStore, JSON.stringify(liveProducts)],
+        );
+        await this.dataSource.query(
+          `INSERT INTO public.store_categories (store_id, payload, updated_at)
+           VALUES ($1::uuid, $2::jsonb, now())
+           ON CONFLICT (store_id)
+           DO UPDATE SET payload = EXCLUDED.payload, updated_at = now(), is_deleted = false`,
+          [targetStore, JSON.stringify([...categories.values()])],
+        );
+        syncedCount = liveProducts.length;
+        console.log(`🛒 [WooCommerce Dynamic Ingest] Synced ${syncedCount} items into store_products for Store: ${targetStore}`);
       } catch (err: any) {
         console.log(`⚠️ [Catalog Ingest Exception] ${err.message}`);
       }
